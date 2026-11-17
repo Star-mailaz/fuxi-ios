@@ -1,8 +1,21 @@
-# iOS on Xiaomi 13
+<div align="center">
 
-**小米 13（`fuxi`／Snapdragon 8 Gen 2／SM8550）的 iOS／XNU 實驗移植專案。**
+# Xiaomi 13 (`fuxi` / SM8550) iOS / XNU Bring-up
 
-本倉庫用來整理核心適配、驅動、iOS userland 相容層、引導工具、雙系統選單與建置驗證流程。目前主要開發路線為 **iOS 16.7.16（20H392）／XNU 8796.141.3**。
+**小米 13 的 iOS／XNU 實驗移植專案，涵蓋核心適配、驅動、iOS userland 相容層、引導工具、雙系統選單與建置驗證流程。**
+
+[![Device](https://img.shields.io/badge/Device-Xiaomi%2013%20(fuxi)-orange?style=flat-square)](#裝置與操作原則)
+[![SoC](https://img.shields.io/badge/SoC-Snapdragon%208%20Gen%202%20(SM8550)-blue?style=flat-square)](#裝置與操作原則)
+[![iOS](https://img.shields.io/badge/iOS-16.7.16%20(20H392)-blue?style=flat-square)](#目前進度)
+[![Status](https://img.shields.io/badge/Status-Experimental-yellow?style=flat-square)](#倉庫狀態)
+
+[倉庫狀態](#倉庫狀態) · [目前進度](#目前進度) · [預計收錄](#預計收錄) · [裝置與操作原則](#裝置與操作原則) · [外部資產與授權](#外部資產與授權)
+
+</div>
+
+---
+
+目前主要開發路線為 **iOS 16.7.16（20H392）／XNU 8796.141.3**。
 
 > 本專案仍在實驗階段，尚不適合作為日常手機系統，也不是可直接刷入的完整 ROM。
 
