@@ -51,10 +51,3 @@
 本倉庫不提供 Apple IPSW、DMG、RootFS、專有系統二進位、高通韌體、iOS SDK、個人手機備份、金鑰或 Wi-Fi 憑證。需要的外部資產須由使用者自行合法取得或從自己的裝置擷取。
 
 各項來源將保留原作者、上游版本與授權聲明；具體授權及第三方清單會隨程式碼遷入補齊，不以單一授權取代上游條款。
-
-## 既有開發紀錄
-
-- [原部署與 bring-up 倉庫](https://github.com/scyx2611/fuxi-ios-bringup)（目前為私有）。
-- [核心／userland 建置與驗證倉庫](https://github.com/scyx2611/fuxi-metal-frontend-check-20261108/tree/codex/adsp-battery)。
-
-本倉庫作為後續整理入口，既有倉庫與開發紀錄保留作來源追溯；遷移完成範圍將另行標示。
