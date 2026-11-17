@@ -9,7 +9,7 @@
 [![iOS](https://img.shields.io/badge/iOS-16.7.16%20(20H392)-blue?style=flat-square)](#目前進度)
 [![Status](https://img.shields.io/badge/Status-Experimental-yellow?style=flat-square)](#倉庫狀態)
 
-[倉庫狀態](#倉庫狀態) · [目前進度](#目前進度) · [預計收錄](#預計收錄) · [裝置與操作原則](#裝置與操作原則) · [外部資產與授權](#外部資產與授權)
+[倉庫狀態](#倉庫狀態) · [目前進度](#目前進度) · [倉庫內容](#倉庫內容) · [裝置與操作原則](#裝置與操作原則) · [外部資產與授權](#外部資產與授權)
 
 </div>
 
@@ -21,9 +21,11 @@
 
 ## 倉庫狀態
 
-**2026-11-18：建立新倉庫，先提供專案介紹。**
+**2026-11-18：原始碼、補丁、測試、建置腳本與引導工具已收錄。**
 
-現有開發成果仍在整理，原始碼、補丁、測試與建置文件尚未遷入。下表描述既有開發環境的驗證進度，**不代表目前的介紹文件已足以重現這些成果**。
+核心基底（zgl97/ios-fuxi）、loader 原始碼樹（bangprovn/ios-fuxi）與 `mkbootimg.py` 都已收進本倉庫，本機建置不必再向上游下載。Apple 的 IPSW／RootFS、高通韌體、iOS SDK 與工具鏈仍須自行準備，詳見[來源與目錄說明](docs/source-layout.zh-TW.md)。
+
+2026-11-18 已從本倉庫的 clone 在 WSL 重編 9g 核心（38 項主機測試通過）與 `libfuxi-sb.dylib`；這兩份產物沒有另外上機。下表是開發工作區的實機驗證進度。
 
 ## 目前進度
 
@@ -107,7 +109,7 @@
 | 影片硬體解碼 | 尚未驗收 | 尚無 Iris VPU／VideoToolbox 硬解播放通過紀錄。[E15](docs/status-20261118.zh-TW.md#e15) |
 | 日期與時間 | 校時與台北時區已有驗證 | ADT RTC offset 已生效，UI 曾確認顯示台北時間；完全斷電或 RTC 重設後需重新校準，長期走時未驗收。[E11](docs/status-20261118.zh-TW.md#e11) |
 | 第三方 App | 已有安裝及啟動案例 | 酷安 **16.2.5** 重簽 **28 個 Mach-O** 後可執行；登入與所有 app group 功能未驗收，不能推定所有 IPA 相容。[E14](docs/status-20261118.zh-TW.md#e14) |
-| 雙系統圖形選單 | 僅主機驗證通過 | 選單、按鍵模型及候選映像已離線建置；**未安裝新選單、未做新選單實機驗收**。[E13](docs/status-20261118.zh-TW.md#e13) |
+| 雙系統圖形選單 | 已常駐 boot_a | boot_a 為 `menu-launching-20261118`，安裝後 Android、iOS、Recovery 三條路徑都已實機驗證；開 iOS＝重開後在選單選 iOS。其他選項的 Fastboot／重新啟動／關機、完全關機後冷開機、ABL 重試與回退**尚未驗收**；b 槽選 Android 仍會循環。[E13](docs/status-20261118.zh-TW.md#e13) |
 
 ### 開發工具
 
@@ -118,15 +120,29 @@
 
 [查驗方法、原始紀錄索引與限制說明](docs/status-20261118.zh-TW.md)。數值屬指定測試樣本，不是所有版本、所有情境的保證。
 
-## 預計收錄
+## 倉庫內容
 
-- 核心與板級適配補丁、驅動及對應測試。
-- iOS userland 相容層與原生功能接線。
-- Loader、Android／iOS 引導鏈與雙系統選單來源。
-- Windows／WSL 本機建置及必要的 CI 工作流程。
-- 經整理的功能狀態、依賴版本、驗證方法與重建說明。
+| 路徑 | 內容 |
+| --- | --- |
+| `patches/` | 核心、Metal、Turnip 等補丁。本機與 CI 建置依 `.github/workflows/kernel-adsp-battery.yml` 的順序，把其中 18 份套到核心基底上 |
+| `tests/`、`tools/`、`userland/` | 主機測試、ath12k 與震動／手電筒等工具，以及 iOS 端 `libfuxi-sb.dylib`（`userland/fuxi-shape/`） |
+| `.github/workflows/` | 既有 CI 工作流程，未改觸發條件（見[來源與目錄說明](docs/source-layout.zh-TW.md#ci)） |
+| `work/adsp-battery/ksrc/` | 核心原始碼樹：上游 zgl97/ios-fuxi `979e2f08` 加本機修改（XNU 驅動、loader、ADT 產生器） |
+| `ios-fuxi/` | loader 與工具原始碼樹：上游 bangprovn/ios-fuxi `27f6a31` 加本機修改 |
+| `dualboot/` | 雙系統圖形選單、安裝與救援工具（說明見 `dualboot/README.zh-TW.md`） |
+| `work/localbuild/` | Windows＋WSL 本機核心與 dylib 建置腳本 |
+| `work/`（其他） | loader 產生器、引導鏈、手機啟動器、iOS 根映像整備與檢查工具 |
+| `uefi-fuxi/Resources/Scripts/mkbootimg.py` | AOSP `mkbootimg.py`（Apache-2.0，未修改） |
+| `upstream/EXPORT-SOURCES.txt` | 各上游的釘選版本、tree id、本機修改清單與去識別化紀錄 |
+| `docs/` | 功能查驗、CPU／GPU 配置與[來源與目錄說明](docs/source-layout.zh-TW.md) |
 
-具體目錄結構、依賴版本與使用指令將在來源整理及乾淨環境驗證後補上。目前不提供部署步驟。
+本機建置 9g 核心（需先在 WSL 裝好工具鏈，見來源與目錄說明）：
+
+```powershell
+work\localbuild\build-kernel.ps1 -Ram 9g -Name kernel-local-<實驗名>-9g-artifact -Tests
+```
+
+目前不提供一般使用者的刷機或部署步驟。
 
 ## 裝置與操作原則
 
@@ -141,4 +157,6 @@
 
 本倉庫不提供 Apple IPSW、DMG、RootFS、專有系統二進位、高通韌體、iOS SDK、個人手機備份、金鑰或 Wi-Fi 憑證。需要的外部資產須由使用者自行合法取得或從自己的裝置擷取。
 
-各項來源將保留原作者、上游版本與授權聲明；具體授權及第三方清單會隨程式碼遷入補齊，不以單一授權取代上游條款。
+本專案自己撰寫的程式碼以 [MIT](LICENSE) 授權。對 Apple XNU 原始檔的修改依 APSL 2.0；其他上游元件維持各自的授權，原有的 LICENSE、NOTICE 與檔頭都保留。
+
+收錄的 bangprovn/ios-fuxi 與 zgl97/ios-fuxi 上游沒有宣告授權，其作者保有原有權利；MIT 只涵蓋本專案新增的部分。權利人如要求移除，會照辦。完整清單見 [THIRD_PARTY.md](THIRD_PARTY.md)。
