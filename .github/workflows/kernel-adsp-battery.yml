@@ -1,0 +1,185 @@
+name: Build kernel with the audio DSP and its battery manager (fuxiadsp, on top of fuxibacklight=4)
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ram_layout:
+        type: string
+        default: full
+      artifact_name:
+        type: string
+        default: fuxi-kernel-adsp-battery
+      runner_label:
+        type: string
+        default: macos-15-intel
+      ath12k:
+        type: boolean
+        default: false
+  # A workflow that is not on the default branch cannot be dispatched by hand, so the branch push starts it.
+  push:
+    branches:
+      - codex/adsp-battery
+    paths:
+      - patches/kernel-surface-stride.patch
+      - patches/kernel-bo-slots.patch
+      - patches/kernel-surfrow-mode2.patch
+      - patches/kernel-perf-governor.patch
+      - patches/kernel-ib-profile.patch
+      - patches/kernel-perf-wide.patch
+      - patches/kernel-prof-live.patch
+      - patches/kernel-prof-inclusive.patch
+      - patches/kernel-swipe-pacing.patch
+      - patches/kernel-prof-inclusive-wait.patch
+      - patches/kernel-prof-edges.patch
+      - patches/kernel-taps-presets.patch
+      - patches/kernel-input-fixes.patch
+      - patches/kernel-taps-page2.patch
+      - patches/kernel-ibprof-draws.patch
+      - patches/kernel-taps-page1.patch
+      - patches/kernel-backlight-dsi.patch
+      - patches/kernel-adsp-battery.patch
+      - tests/test-backlight-dsi.py
+      - tests/test-perf-governor.py
+      - tests/test-ib-profile.py
+      - tests/test-surface-plane-result.py
+      - tests/test-bo-slots.py
+      - tests/test-surfrow-mode2.py
+      - .github/workflows/kernel-adsp-battery.yml
+permissions:
+  contents: read
+  actions: read
+jobs:
+  kernel:
+    runs-on: ${{ inputs.runner_label || 'macos-15-intel' }}
+    timeout-minutes: 180
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      FUXI_IIG_MODE: replay
+      FUXI_RAM_LAYOUT: ${{ inputs.ram_layout || 'full' }}
+    steps:
+      - name: Check out public test harness
+        uses: actions/checkout@v4
+        with:
+          path: harness
+          persist-credentials: false
+      - name: Fetch pinned public kernel source and apply patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init source
+          git -C source remote add origin https://github.com/zgl97/ios-fuxi.git
+          git -C source fetch --no-tags --depth=1 origin 979e2f08c704677bb75934ae96d4686ba9d1692b
+          git -C source checkout --detach FETCH_HEAD
+          test "$(git -C source rev-parse HEAD)" = 979e2f08c704677bb75934ae96d4686ba9d1692b
+          git -C source apply --check ../harness/patches/kernel-surface-stride.patch
+          git -C source apply ../harness/patches/kernel-surface-stride.patch
+          git -C source apply --check ../harness/patches/kernel-bo-slots.patch
+          git -C source apply ../harness/patches/kernel-bo-slots.patch
+          git -C source apply --check ../harness/patches/kernel-surfrow-mode2.patch
+          git -C source apply ../harness/patches/kernel-surfrow-mode2.patch
+          python3 harness/tests/test-surface-plane-result.py source
+          python3 harness/tests/test-bo-slots.py source
+          python3 harness/tests/test-surfrow-mode2.py source
+          git -C source apply --check ../harness/patches/kernel-perf-governor.patch
+          git -C source apply ../harness/patches/kernel-perf-governor.patch
+          python3 harness/tests/test-perf-governor.py source
+          git -C source apply --check ../harness/patches/kernel-ib-profile.patch
+          git -C source apply ../harness/patches/kernel-ib-profile.patch
+          python3 harness/tests/test-ib-profile.py source
+          git -C source apply --check ../harness/patches/kernel-perf-wide.patch
+          git -C source apply ../harness/patches/kernel-perf-wide.patch
+          python3 source/tools/sync-fuxi-perf.py --check
+          git -C source apply --check ../harness/patches/kernel-prof-live.patch
+          git -C source apply ../harness/patches/kernel-prof-live.patch
+          git -C source apply --check ../harness/patches/kernel-prof-inclusive.patch
+          git -C source apply ../harness/patches/kernel-prof-inclusive.patch
+          git -C source apply --check ../harness/patches/kernel-swipe-pacing.patch
+          git -C source apply ../harness/patches/kernel-swipe-pacing.patch
+          git -C source apply --check ../harness/patches/kernel-prof-inclusive-wait.patch
+          git -C source apply ../harness/patches/kernel-prof-inclusive-wait.patch
+          git -C source apply --check ../harness/patches/kernel-prof-edges.patch
+          git -C source apply ../harness/patches/kernel-prof-edges.patch
+          git -C source apply --check ../harness/patches/kernel-taps-presets.patch
+          git -C source apply ../harness/patches/kernel-taps-presets.patch
+          git -C source apply --check ../harness/patches/kernel-input-fixes.patch
+          git -C source apply ../harness/patches/kernel-input-fixes.patch
+          git -C source apply --check ../harness/patches/kernel-taps-page2.patch
+          git -C source apply ../harness/patches/kernel-taps-page2.patch
+          git -C source apply --check ../harness/patches/kernel-ibprof-draws.patch
+          git -C source apply ../harness/patches/kernel-ibprof-draws.patch
+          git -C source apply --check ../harness/patches/kernel-taps-page1.patch
+          git -C source apply ../harness/patches/kernel-taps-page1.patch
+          git -C source apply --check ../harness/patches/kernel-backlight-dsi.patch
+          git -C source apply ../harness/patches/kernel-backlight-dsi.patch
+          python3 harness/tests/test-backlight-dsi.py source
+          git -C source apply --check ../harness/patches/kernel-adsp-battery.patch
+          git -C source apply ../harness/patches/kernel-adsp-battery.patch
+          (cd source && python3 tools/sync-fuxi-adsp.py --check && python3 tools/sync-fuxi-unixnu.py --check && python3 tools/sync-fuxi-backlight.py --check)
+          (cd source && python3 tools/test-fuxi-prof.py)
+          (cd source && python3 tools/test-fuxi-ram9g.py)
+          (cd source && python3 tools/test-fuxi-ram-sku.py)
+          (cd source && python3 tools/sync-fuxi-wlan.py --check)
+          (cd source && python3 tools/test-fuxi-rpmh-shared.py)
+          (cd source && python3 tools/test-fuxi-torch-pulse.py)
+          (cd source && python3 tools/test-fuxi-torch-runtime.py)
+          (cd source && python3 tools/test-fuxi-torch-steady.py --sanitize)
+          (cd source && python3 tools/test-fuxi-torch-audit.py)
+          (cd source && CC=clang python3 tools/test-fuxi-haptic-pulse.py)
+          (cd source && CC=clang python3 tools/test-fuxi-haptic-pulse.py --syntax-only)
+          (cd source && python3 tools/test-fuxi-haptic-survey.py --cc clang)
+          (cd source && python3 tools/test-fuxi-haptic-survey.py --cc clang --syntax-only)
+          (cd source && CC=clang python3 tools/test-fuxi-haptic-runtime.py)
+          (cd source && CC=clang python3 tools/test-fuxi-exec-inject.py)
+          (cd source && python3 tools/test-fuxi-audio-prep.py --sanitize)
+          (cd source && python3 tools/test-fuxi-audio-spf.py)
+          (cd source && python3 tools/test-fuxi-battery-prep.py --sanitize)
+          (cd source && python3 tools/test-fuxi-battery-publication.py --sanitize)
+          (cd source && python3 tools/test-fuxi-rtc-read.py)
+          (cd source && python3 tools/test-fuxi-ram-inventory.py)
+          (cd source && python3 tools/test-fuxi-bluetooth.py --sanitize)
+          (cd source && python3 tools/test-fuxi-bluetooth-xnu.py --sanitize)
+          (cd source && python3 tools/test-fuxi-bt-geni-fifo.py --sanitize)
+          (cd source && python3 tools/test-fuxi-bt-board.py --sanitize)
+          (cd source && python3 tools/sync-fuxi-h1.py --check && python3 tools/test-fuxi-tap-command.py)
+          (cd source && python3 tools/test-fuxi-ramtest.py)
+          (cd source && python3 tools/test-fuxi-wlan-m6i.py)
+          (cd source && python3 tools/test-fuxi-wlan-rails.py)
+          (cd source && python3 tools/test-fuxi-wlan-w18.py)
+      - name: Download the pinned public ath12k link input
+        if: ${{ inputs.ath12k }}
+        uses: actions/download-artifact@v4
+        with:
+          name: fuxi-ath12k-objects
+          path: ath12k-out
+          run-id: 44010197996
+          github-token: ${{ github.token }}
+      - name: Verify the optional ath12k link input
+        if: ${{ inputs.ath12k }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 source/tools/test-fuxi-ath12k-link.py ath12k-out
+          python3 source/tools/ci/ath12k-link.py ath12k-out
+          (cd source && python3 tools/test-fuxi-wlan-ath12k.py --sanitize)
+          (cd source && python3 tools/test-fuxi-wlan-ios.py)
+          echo "FUXI_ATH12K_OBJECT=$PWD/ath12k-out/fuxi_ath12k.o" >> "$GITHUB_ENV"
+      - name: Build and audit kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd source
+          xcodebuild -version
+          if bash tools/ci/build.sh kernel-metal4 > kernel-console.log 2>&1; then
+            echo 'Kernel build and audit passed; complete output is in the artifact logs/build.log.'
+          else
+            tail -n 100 kernel-console.log
+            exit 1
+          fi
+      - name: Upload public-source kernel outputs and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name || 'fuxi-kernel-adsp-battery' }}
+          path: source/tools/out/ci/kernel-metal4/
+          if-no-files-found: warn
+          retention-days: 7
