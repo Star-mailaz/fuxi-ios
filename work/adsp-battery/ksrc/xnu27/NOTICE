@@ -1,0 +1,132 @@
+xnu27/ notices
+==============
+
+The patch series in this directory is applied to Apple's xnu-12377.121.6 source
+(APSL 2.0, https://github.com/apple-oss-distributions/xnu). Apple's own files are
+not copied here; the patches only carry changed lines and keep the APSL headers of
+files they add.
+
+UniXNU layers (BSD-2-Clause-Patent)
+-----------------------------------
+
+patches/unixnu/*.patch
+  UniXNU, https://github.com/UniXNU/UniXNU, commit 88604d0
+  (patches/xnu-12377/), copied verbatim; the selection and order are in series.
+patches/sheng/sheng-cpu-mmu.patch
+  UniXNU-sheng, https://github.com/UniXNU/UniXNU-sheng, branch
+  feat/ipados27-gpu-parity at 5b7d83c: per-file extract of
+  patches/xnu-12377/zzzz-sheng-ipados27-bringup.patch and
+  zzye-sheng-cpu-idle.patch (hunks unchanged; the patch header lists the files).
+patches/sheng/sheng-kernel-stack-shift.patch
+  UniXNU-sheng at 5b7d83c: osfmk/kern/stack.c hunk of the same bring-up patch,
+  unchanged (unixnu_kernel_stack_shift for XnuPrelink's reviewed AMFI site).
+patches/sm8550/native-smp-secondary-start.patch
+  UniXNU-sm8550-common, https://github.com/UniXNU/UniXNU-sm8550-common,
+  commit 23b2049fcd9e30356161def84231334fb55ecca9: start.s hunk of
+  patches/xnu/native-smp-secondary.patch.
+components/ArmCpu, components/ArmDTPlatform
+  https://github.com/UniXNU/ArmCpu and https://github.com/UniXNU/ArmDTPlatform,
+  copied unchanged with their own LICENSE files (revisions and hashes in
+  components/README.md).
+libpthread/explicit-kernel-address.patch
+  UniXNU 88604d0, patches/libpthread/explicit-kernel-address.patch, copied
+  verbatim; applied to libpthread-539.100.4 (APSL 2.0, fetched by CI at
+  LIBPTHREAD_SHA, never copied here) in the order of libpthread/series.
+tools/ci/build-libpthread27.py (outside this directory)
+  port of UniXNU 88604d0 scripts/build-libpthread-kernel.py (the libpthread
+  kernel sources, compile flags, collision renaming and import audit, and the
+  bootstrap compiled with xnu's own compile record); the -force_load link into
+  the DEVELOPMENT, chained and RELEASE kernels in tools/ci/build-xnu27.sh follows
+  scripts/build-xnu-4k-baseline.sh (XNU_SOURCE_PTHREAD) and
+  scripts/build-fileset-release-reference.py. Its own changes are listed in its
+  docstring ("Fuxi:").
+tools/mkadt-fuxi27.py (outside this directory) follows the tree shape of
+  UniXNU-sheng scripts/make-sheng-adt.py.
+tools/xnuprelink/ (outside this directory)
+  XnuPrelink, https://github.com/UniXNU/XnuPrelink, commit 76452c6 (the
+  revision UniXNU 88604d0 pins): the Python modules, tests, fixtures and
+  LICENSE, copied verbatim (changes, if any, carry a "Fuxi:" comment).
+
+The UniXNU, UniXNU-sheng, UniXNU-sm8550-common and XnuPrelink licence text:
+
+Copyright (c) 2026, UniXNU contributors. All rights reserved.
+
+SPDX-License-Identifier: BSD-2-Clause-Patent
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice,
+   this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+Subject to the terms and conditions of this license, each copyright holder
+and contributor hereby grants to those receiving rights under this license
+a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+(except for failure to satisfy the conditions of this license) patent
+license to make, have made, use, offer to sell, sell, import, and otherwise
+transfer this software, where such license applies only to those patent
+claims, already acquired or hereafter acquired, licensable by such copyright
+holder or contributor that are necessarily infringed by:
+
+(a) their Contribution(s) (the licensed copyrights of copyright holders and
+    non-copyrightable additions of contributors, in source or binary form)
+    alone; or
+
+(b) combination of their Contribution(s) with the work of authorship to
+    which such Contribution(s) was added by such copyright holder or
+    contributor, if, at the time the Contribution is added, such addition
+    causes such combination to be necessarily infringed. The patent license
+    shall not apply to any other combinations which include the
+    Contribution.
+
+Except as expressly stated above, no rights or licenses from any copyright
+holder or contributor is granted under this license, whether expressly, by
+implication, estoppel or otherwise.
+
+DISCLAIMER
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS BE
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+
+Fuxi layer
+----------
+
+patches/fuxi/*.patch are this repository's own changes (same terms as the rest of
+the repository); the code they add to Apple files is under that file's APSL 2.0
+header. 0002-builtin-crypto.patch ports the repository's xnu-8796 HMAC-SHA256
+DRBG (xnu/patches/0014-sweet-kernel-hmac-prng.patch) and calls the digests already in xnu's osfmk/corecrypto.
+
+patches/fuxi/0007-root27-storage.patch (K4) adds iokit/Kernel/arm/FuxiRoot27.cpp and
+fuxi_root27.h, this repository's own code: the UFS transport is the default
+(non-UniXNU) path of the xnu-8796 lane's sweet_ufs.c, reduced to read-only
+commands; the UniXNU NativeUfs completion/quarantine policy that file also
+carries is not used. iokit/Kernel/arm/fuxi_storage_abi.h restates the
+IOStorage and IOMedia class declarations (virtual method order, names and
+argument types only, no code) from Apple's IOStorageFamily-337.100.1
+IOStorage.h and IOMedia.h (https://github.com/apple-oss-distributions/IOStorageFamily,
+APSL 2.0) and keeps their APSL header; nothing from Apple binaries is in it.
+
+patches/fuxi/0008-dada-apfs.patch adds bsd/miscfs/apfs/ (a read-only APFS
+filesystem) and bsd/miscfs/ramfs/ramfs.c (a filesystem in memory) from
+hakios-arm64e-dada, https://github.com/superboyyy/hakios-arm64e-dada, commit
+f1ae906 (kernel/xnu-12377.121.6-dada.patch, APSL 2.0, built on HakiOS,
+https://github.com/oosexgang/hakios-xnu-kernel), with their vfs_conf.c
+registration. The files are unchanged except FUXI-gated stand-ins for the
+HakiOS-only redwood devices, the kern.redwood_memory sysctl and the per-thread
+run clocks. Inside it, bsd/miscfs/apfs/libdeflate/ is libdeflate (MIT, Eric
+Biggers and Google LLC; COPYING kept) and bsd/miscfs/apfs/libzbitmap/ with
+apfs_zbitmap.c is libzbitmap (GPL-2.0+ OR MIT, Corellium LLC), taken under MIT
+as in hakios-arm64e-dada.
