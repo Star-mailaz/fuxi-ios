@@ -23,6 +23,10 @@
 #include <kern/clock.h>
 #include <mach/mach_time.h>
 #include "fuxi_backlight_logic.h"
+#include "fuxi_dsi_backlight_logic.h"
+
+/* fuxibacklight=4: the AppleARMBacklight service in FuxiDsiBacklight.cpp (the display owner sends the levels). */
+void fuxi_dsi_backlight_publish(IOService *provider);
 
 enum { BL_READ, BL_SET, BL_PROPERTIES, BL_OPEN, BL_METHOD, BL_BRIGHTNESS, BL_POWER, BL_COUNT };
 static volatile SInt32 bl_events[BL_COUNT];
@@ -302,6 +306,7 @@ void fuxi_backlight_publish(IOService *provider)
 {
 	int enable = 0;
 	bool present = PE_parse_boot_argn("fuxibacklight", &enable, sizeof(enable));
+	if (fdbl_enabled(present, enable)) { fuxi_dsi_backlight_publish(provider); return; }
 	if (!fbl_enabled(present, enable)) return;
 	FuxiBacklight *service = new FuxiBacklight;
 	if (!service) { IOLog("FUXI BACKLIGHT: allocation failed\n"); return; }

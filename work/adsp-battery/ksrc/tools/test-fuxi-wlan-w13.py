@@ -74,7 +74,7 @@ static void qmi_peer(const uint8_t *q,unsigned len) {
     }
     if(msg==0x36) {
         responses++;snapshot_start=ne;
-        if(trial!=8 && responses==1) {
+        if(trial!=8 && trial!=14 && responses==1) {
             const uint8_t zero[]={0,3,0,0x36,0,4,0,1,1,0,0};
             assert(len==sizeof(zero) && !memcmp(q,zero,len));
             assert(wl_iova_next==target_cursor);
@@ -85,13 +85,15 @@ static void qmi_peer(const uint8_t *q,unsigned len) {
             if(trial!=2 && trial!=3 && trial!=5)split_request();
             return;
         }
-        assert(q[7]==1 && q[9]==0 && q[10]==(trial==8?5:9));
         const unsigned types[]={1,3,4,9,2};
-        unsigned count=trial==8?5:9;
+        const unsigned big_size[]={7274496,8454144}; /* trial 14: P17 BIGMEM grants the literal large request */
+        unsigned count=trial==8?5:trial==14?2:9;
+        assert(q[7]==1 && q[9]==0 && q[10]==count);
         assert(len==11+17*count && q[8]==1+17*count);
         for(unsigned i=0;i<count;i++) {
             const uint8_t *v=q+11+17*i;uint64_t addr=get32(v)|((uint64_t)get32(v+4)<<32);
-            unsigned size=trial==8?65537:chunk_size[i], type=trial==8?types[i]:(i<4?1:4);
+            unsigned size=trial==8?65537:trial==14?big_size[i]:chunk_size[i];
+            unsigned type=trial==8?types[i]:trial==14?(i?4:1):(i<4?1:4);
             assert(get32(v+8)==size && get32(v+12)==type && !v[16]);
             if(trial==8 && i==4) {assert(!addr && !wl_target[i].va);continue;}
             /* Independent power-of-two test, explicit write permission decode. */
@@ -113,7 +115,7 @@ static void qmi_peer(const uint8_t *q,unsigned len) {
         if(trial==12)split_request(); /* forbidden after real provisioning */
         return;
     }
-    assert(msg==0x24 && len==7 && txn==(trial==8?4:5) && wl12_ready);
+    assert(msg==0x24 && len==7 && txn==(trial==8||trial==14?4:5) && wl12_ready);
     cap_requests++;
     uint8_t p[sizeof(cap_reply)];memcpy(p,cap_reply,sizeof(p));put16(p+1,txn);
     dev_qrtr(1,p,sizeof(p),false,false);
@@ -161,6 +163,13 @@ int main(void) {
         if(n==2)assert(strstr(logbuf,"queued before delayed RESPOND_MEM reply"));
         unsigned before=ne;wl_finish(28);assert(ne==before && !frees);contain();
     }
+    /* P17 BIGMEM: one real RESPOND_MEM for the two large chunks, power-of-two IOVAs, no negotiation. */
+    boot(14,true);wl17_bits=WL17_BIGMEM;
+    {int e=finish_step();if(e)fprintf(stderr,"trial %u\n%s",trial,logbuf);
+     assert(!e && wl_w11_ok && cap_requests==1 && responses==1 && !wl13_negotiated && wl12_txn==4);
+     assert(wl_target_n==2 && wl_target_total==15728640 && strstr(logbuf,"P17 bigmem grants n=2 total=15728640"));
+     assert(!strstr(logbuf,"zero segments before any target allocation") && strstr(logbuf,"AP[7:6]=1 RW"));}
+    wl_finish(28);contain();wl17_bits=0;
     boot(8,false);done();assert(!wl13_negotiated && wl12_txn==4);
     assert(strstr(logbuf,"unsupported target type 2"));wl_finish(28);assert(frees==allocations);dev_on=false;
     const unsigned failures[]={3,4,5,6,7,9,10,11,12,13};

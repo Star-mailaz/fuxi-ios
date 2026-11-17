@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 MOCK = r'''
+#define SP_NO_LIVE 1 /* the live-register cross-call (FUXI) is kernel-only; the model keeps the saved-state path */
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -55,6 +56,8 @@ static struct task task={&th,0x100000000};
 static struct region region={0x200000};
 static unsigned locks,schedlock,high,reads,refs,allocs,frees,starts,threadrefs,output,sleeps,blocks;
 static unsigned boot_present,boot_value,missing,allocfail,readfail,malformed,cost,non64;
+static unsigned profile_present;
+static const char *profile_name,*process_name="backboardd";
 static uint64_t ticks,wake,last_leeway;
 static char logs[500][512];
 static jmp_buf terminated;
@@ -64,7 +67,7 @@ static int model_printf(const char *fmt,...) {
 }
 #define printf model_printf
 static task_t proc_task(proc_t p){assert(p==1);return &task;}
-static void proc_name(int pid,char *out,size_t size){assert(pid==1);snprintf(out,size,"%s",missing?"other":"backboardd");}
+static void proc_name(int pid,char *out,size_t size){assert(pid==1);snprintf(out,size,"%s",missing?"other":process_name);}
 static int proc_pid(proc_t p){return p;}
 static void proc_iterate(int which,int (*fn)(proc_t,void *),void *arg,void *filter,void *farg){assert(which==1 && !filter && !farg);fn(1,arg);}
 static void task_reference(task_t t){assert(t==&task);refs++;}
@@ -108,12 +111,17 @@ static void kfree_data(void *ptr,size_t size){assert(size && ptr && !locks);free
 static vm_shared_region_t vm_shared_region_get(task_t t){assert(t==&task);return &region;}
 static void vm_shared_region_deallocate(vm_shared_region_t sr){assert(sr==&region);}
 void thread_terminate_self(void){longjmp(terminated,1);}
-static int PE_parse_boot_argn(const char *name,void *value,unsigned size){assert(!strcmp(name,"sweetprof") && size==4);*(unsigned *)value=boot_value;return boot_present;}
+static int PE_parse_boot_argn(const char *name,void *value,unsigned size){
+ if(!strcmp(name,"sweetprof")){assert(size==4);*(unsigned *)value=boot_value;return boot_present;}
+ assert(!strcmp(name,"sweetprofname") && size==33);
+ if(!profile_present)return 0;
+ size_t length=strlen(profile_name)+1;memcpy(value,profile_name,length<size?length:size);return 1;
+}
 static int kernel_thread_start(void (*fn)(void *,int),void *arg,thread_t *thread){assert(fn && !arg);starts++;*thread=&th;threadrefs++;return 0;}
 static void thread_deallocate(thread_t t){assert(t==&th && threadrefs);threadrefs--;}
 '''
 TEST = r'''
-static void reset(void){assert(!refs && !locks && !high && !schedlock);ticks=0;reads=allocs=frees=starts=threadrefs=output=sleeps=blocks=0;missing=allocfail=readfail=malformed=cost=non64=0;th.ss=&regs;th.state=TH_WAIT;th.oncore=0;regs.fp=0x1000;}
+static void reset(void){assert(!refs && !locks && !high && !schedlock);ticks=0;reads=allocs=frees=starts=threadrefs=output=sleeps=blocks=0;missing=allocfail=readfail=malformed=cost=non64=0;profile_present=0;profile_name=NULL;process_name="backboardd";sp_target_name="backboardd";sp_delay=60;th.ss=&regs;th.state=TH_WAIT;th.oncore=0;regs.fp=0x1000;}
 static void worker(void){if(!setjmp(terminated))sp_worker(NULL,0);assert(!refs && !threadrefs && !locks);}
 int main(void){
  reset();for(unsigned present=0;present<2;present++)for(unsigned value=0;value<4;value++){
@@ -122,6 +130,19 @@ int main(void){
   assert(sp_delay==(present && value>1?value:60));sp_delay=60;
  }
  boot_present=1;boot_value=3601;{unsigned before=starts;sweet_prof_start();assert(starts==before && sp_delay==60);}
+ reset();boot_present=1;boot_value=1;profile_present=1;profile_name=process_name="coreduetd";
+ sweet_prof_start();assert(starts==1 && !strcmp(sp_target_name,"coreduetd"));worker();
+ assert(output==5 && strstr(logs[0],"PROF target coreduetd") && strstr(logs[1],"PROF backboardd[1]"));
+ assert(ticks==120ULL*NSEC_PER_SEC && allocs==1 && frees==1);
+ const char *invalid_names[]={"","a b","../x","a/b","a\nb","abcdefghijklmnopqrstuvwxyzABCDEF","abcdefghijklmnopqrstuvwxyzABCDEFGH"};
+ for(unsigned index=0;index<sizeof(invalid_names)/sizeof(invalid_names[0]);index++){
+  reset();boot_present=1;boot_value=1;profile_present=1;profile_name=invalid_names[index];
+  sweet_prof_start();assert(!starts && !allocs && !sleeps && output==1);
+ }
+ reset();boot_present=1;boot_value=0;profile_present=1;profile_name="coreduetd";
+ sweet_prof_start();assert(!starts && !output && !allocs);
+ reset();boot_present=1;boot_value=10001;sweet_prof_start();assert(starts==1 && !strcmp(sp_target_name,"SpringBoard"));
+ reset();
  worker();assert(ticks==120ULL*NSEC_PER_SEC && sleeps==30001 && blocks==sleeps && last_leeway==100000);
  assert(reads==240000 && allocs==1 && frees==1 && output==4);
  assert(strstr(logs[0],"PROF backboardd[1] slide 0x200000 mh 0x100000000"));
@@ -173,7 +194,7 @@ int main(void){
  unsigned summaries=0;for(unsigned i=0;i<output;i++)if(strstr(logs[i]," total="))summaries++;
  assert(summaries==SP_THREADS);free(p);
 #undef printf
- puts("PASS: actual profiler C: boot gate, 60+60s/2ms/leeway, no spin/catch-up/allocation/logging in sweeps, task refs, failure cleanup, states/x16, fault-safe bounded frames, aggregation/mixed/top12/overflow/400-line cap");
+ puts("PASS: actual profiler C: boot gate and named target validation, 60+60s/2ms/leeway, no spin/catch-up/allocation/logging in sweeps, task refs, failure cleanup, states/x16, fault-safe bounded frames, aggregation/mixed/top12/overflow/400-line cap");
 }
 '''
 

@@ -1,0 +1,22 @@
+--- a/bsd/dev/gpu-handoff.h
++++ b/bsd/dev/gpu-handoff.h
+@@ -4,7 +4,7 @@
+-#define FG_BANK_SIZE 0x140000000ULL
++#define FG_BANK_SIZE 0x240000000ULL
+ #define FG_RAM_BASE 0x8c0000000ULL
+-#define FG_RAM_SIZE 0x13e000000ULL
+-#define FG_SCRATCH  0x9fe000000ULL
++#define FG_RAM_SIZE 0x23e000000ULL
++#define FG_SCRATCH  0xafe000000ULL
+ #define FG_SCRATCH_SIZE 0x02000000u
+ #define FG_HANDOFF  (FG_SCRATCH + 0x1800000)
+ #define FG_FW_BASE  (FG_HANDOFF + 0x4000)
+--- a/bsd/dev/gpu.c
++++ b/bsd/dev/gpu.c
+@@ -191,5 +191,5 @@
+  */
+-#define G_MEM       0x9fe000000ULL
++#define G_MEM       0xafe000000ULL
+ #define G_MEM_SIZE  0x02000000u
+ #define G_IC_PA     (G_MEM + 0x100000)
+ #define G_DATA_PA   (G_MEM + 0x1100000)

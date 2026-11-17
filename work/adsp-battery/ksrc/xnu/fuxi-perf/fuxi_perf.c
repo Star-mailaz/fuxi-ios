@@ -57,6 +57,14 @@ static unsigned fp_rise = 100, fp_fast_ms = 20, fp_budget_ms = 200;
 /* Slope window. TSENS reports 0.4 C steps: one step in 20 ms is 200 dC/s and
  * latched the rise guard above 55 C on every tick (observed 54.5 C refusals). */
 static unsigned fp_rate_ms = 200;
+/* Diagnostic opt-ins, both 0 (legacy policy) unless given.
+ * fuxiperfbase=MHz: gold/prime vote while not boosted and not thermally
+ * blocked; a blocked guard still drops to the legacy cool level.
+ * fuxiperfmax=dC: moves the ceiling (up to 80 C) and hot/start/resume with it. */
+static unsigned fp_base_mhz, fp_max, fp_base[3], fp_base_khz[3];
+/* fuxiperf=2: the governor with fuxiperfmax=720 and fuxiperfbudget=1000 as its defaults (one argument where the boot-args
+ * field has no room for three); explicit fuxiperfmax/fuxiperfbudget still win. */
+static unsigned fp_wide;
 static uint64_t fp_budget, fp_duty_window, fp_recovery;
 static uint64_t fp_recover_since, fp_above_time, fp_cuts, fp_active_start;
 static uint64_t fp_duty_begin[16], fp_duty_end[16];
@@ -192,7 +200,7 @@ static int fp_compile_command(int command, struct fuxi_compile_reply *reply)
  } else if (fp_compile_thread != THREAD_NULL) refused = 1;
  else if (!fp_ready || !fp_prev_valid) refused = 2;
  else if (fp_prev_temp > 600 || fp_blocked) refused = 3;
- else if (fp_duty_used(now) >= fp_budget || (!fp_boosted && fp_duty_count == 16)) refused = 4;
+ else if ((fp_budget_ms < 1000 && fp_duty_used(now) >= fp_budget) || (!fp_boosted && fp_duty_count == 16)) refused = 4;
  else {
   int cpu = fuxi_compile_bind((fp_domain_failed[1] ? 0 : 2) | (fp_domain_failed[2] ? 0 : 4));
   if (cpu == -1) refused = 5;
@@ -335,7 +343,7 @@ static void fp_init_report(const char *outcome)
 static int fp_initialize(void)
 {
  unsigned percore[3], cool_level[3], high_level[3], cool_freq[3], high_freq[3];
- unsigned idle_level[3], idle_freq[3];
+ unsigned idle_level[3], idle_freq[3], base_level[3], base_freq[3];
  for (unsigned d = 0; d < 3; d++) {
   if (!fp_epss[d]) fp_epss[d] = ml_io_map(fp_epss_pa[d], 0x1000);
   if (!fp_epss[d]) return fp_init_fail("map",d,fp_epss_pa[d],0,0,0,-1);
@@ -374,6 +382,12 @@ static int fp_initialize(void)
   high_level[d] = d ? (unsigned)high : (unsigned)cool;
   cool_freq[d] = cool_khz;
   high_freq[d] = d ? high_khz : cool_khz;
+  /* Base lies between cool and high; silver and a failed lookup keep cool. */
+  unsigned base_khz = 0;
+  int base = d && fp_base_mhz ? fp_level(rows,count,fp_base_mhz*1000,&base_khz) : -1;
+  if (base < 0 || base_khz < cool_khz || base_khz > high_khz) { base = cool; base_khz = cool_khz; }
+  base_level[d] = (unsigned)base;
+  base_freq[d] = base_khz;
  }
  for (unsigned d = 0; d < 2; d++) {
   if (!fp_tsens[d]) fp_tsens[d] = ml_io_map(fp_tsens_pa[d],0x1000);
@@ -386,6 +400,7 @@ static int fp_initialize(void)
   fp_percore[d] = percore[d];
   fp_cool[d] = cool_level[d]; fp_high[d] = high_level[d];
   fp_cool_khz[d] = cool_freq[d]; fp_high_khz[d] = high_freq[d];
+  fp_base[d] = base_level[d]; fp_base_khz[d] = base_freq[d];
  }
  return 1;
 }
@@ -403,6 +418,9 @@ static int fp_try_initialize(uint64_t now)
   fp_apply_cores();
   printf("FUXI PERF: ready, LUT cool %u/%u/%u kHz high %u/%u/%u kHz, hold 1500 ms after %u retries\n",
       fp_cool_khz[0],fp_cool_khz[1],fp_cool_khz[2],fp_high_khz[0],fp_high_khz[1],fp_high_khz[2],fp_retries);
+  if (fp_base_mhz)
+   printf("FUXI PERF: ready base LUT gold %u prime %u kHz while not blocked (asked %u MHz)\n",
+       fp_base_khz[1],fp_base_khz[2],fp_base_mhz);
   if (fp_idle_after)
    printf("FUXI PERF: ready idle LUT %u/%u/%u kHz after %u ms floor %u kHz (clamped to cool)\n",
        fp_idle_khz[0],fp_idle_khz[1],fp_idle_khz[2],fp_idle_ms,fp_idle_floor);
@@ -432,7 +450,7 @@ static void fp_update_votes(int state)
   } else {
    int compile = fp_compile_high && fp_compile_domain(d);
    unsigned level = (state == FP_HIGH || compile) && !failed ? fp_high[d] :
-       state == FP_IDLE ? fp_idle[d] : fp_cool[d];
+       state == FP_IDLE ? fp_idle[d] : failed || fp_blocked ? fp_cool[d] : fp_base[d];
    if (!fp_applied_valid[d] || fp_applied[d] != level) {
     if (fp_vote(d,level)) {
      fp_applied[d] = fp_domain_failed[d] && state != FP_IDLE ? fp_cool[d] : level;
@@ -528,7 +546,13 @@ static void fp_configure(void)
  fp_arg("fuxiperfidle",&fp_idle_ms,1000,60000);
  fp_arg("fuxiperfidlekhz",&fp_idle_floor,100000,3000000);
  nanoseconds_to_absolutetime((uint64_t)fp_idle_ms*NSEC_PER_MSEC,&fp_idle_after);
- fp_arg("fuxiperflimit",&fp_limit,450,680);
+ fp_arg("fuxiperfbase",&fp_base_mhz,1402,2400);
+ if (fp_wide) { fp_max = 720; fp_budget_ms = 1000; }
+ fp_arg("fuxiperfmax",&fp_max,620,800);
+ if (fp_max) {
+  fp_limit = fp_max; fp_hot = fp_max-60; fp_resume = fp_max-100; fp_start = fp_max-80;
+ }
+ fp_arg("fuxiperflimit",&fp_limit,450,800);
  fp_arg("fuxiperfhot",&fp_hot,400,fp_limit);
  if (fp_hot > fp_limit) fp_hot = fp_limit;
  fp_arg("fuxiperfresume",&fp_resume,350,fp_hot-10);
@@ -537,12 +561,18 @@ static void fp_configure(void)
  fp_arg("fuxiperfrise",&fp_rise,10,1000);
  fp_arg("fuxiperffast",&fp_fast_ms,5,25);
  fp_arg("fuxiperfrate",&fp_rate_ms,fp_fast_ms,1000);
- fp_arg("fuxiperfbudget",&fp_budget_ms,20,500);
+ /* A running boost may continue up to the ceiling; 68 C unless raised. */
+ fp_run_max = fp_limit > 680 ? fp_limit : 680;
+ /* 1000 = no duty limit; the thermal guard is then the only cut. */
+ fp_arg("fuxiperfbudget",&fp_budget_ms,20,1000);
  nanoseconds_to_absolutetime((uint64_t)fp_budget_ms*NSEC_PER_MSEC,&fp_budget);
  nanoseconds_to_absolutetime(NSEC_PER_SEC,&fp_duty_window);
  nanoseconds_to_absolutetime(500ULL*NSEC_PER_MSEC,&fp_recovery);
  printf("FUXI PERF: thermal hot %u limit %u resume %u start %u dC rise %u dC/s fast %u ms slope %u ms duty %u/1000 ms recovery 500 ms predict 100 ms\n",
      fp_hot,fp_limit,fp_resume,fp_start,fp_rise,fp_fast_ms,fp_rate_ms,fp_budget_ms);
+ if (fp_base_mhz || fp_max || fp_budget_ms > 500)
+  printf("FUXI PERF: diagnostic policy base %u MHz max %u dC run max %u dC duty %u/1000 ms\n",
+      fp_base_mhz,fp_max,fp_run_max,fp_budget_ms);
 }
 static void fp_worker_locked(thread_call_param_t arg, thread_call_param_t result)
 {
@@ -574,7 +604,7 @@ static void fp_worker_locked(thread_call_param_t arg, thread_call_param_t result
       fp_pressure_level(fp_pressure,valid,temp,fp_blocked,fp_hot,fp_limit,fp_resume),
       now,&fp_pressure_since,fp_pressure_dwell);
  uint64_t used = fp_duty_used(now);
- int duty_ok = used < fp_budget && (fp_boosted || fp_duty_count < 16);
+ int duty_ok = (fp_budget_ms >= 1000 || used < fp_budget) && (fp_boosted || fp_duty_count < 16);
  fp_compile_poll(now,safe,duty_ok);
  int state = fp_state(fp_touch_high,valid,temp,safe,duty_ok,now,
      __atomic_load_n(&fp_input,__ATOMIC_ACQUIRE),
@@ -653,7 +683,7 @@ static void fp_worker_locked(thread_call_param_t arg, thread_call_param_t result
  clock_interval_to_deadline(fp_boosted || fp_blocked ? fp_fast_ms : 100,
      NSEC_PER_MSEC,&deadline);
  /* Do not overrun a fractional remaining duty budget by a full sample. */
- if (fp_boosted && fp_budget-used < deadline-now) deadline = now+fp_budget-used;
+ if (fp_boosted && fp_budget_ms < 1000 && fp_budget-used < deadline-now) deadline = now+fp_budget-used;
  if (fp_compile_thread != THREAD_NULL && fp_compile_deadline < deadline)
   deadline = fp_compile_deadline;
  (void)thread_call_enter_delayed(&fp_call,deadline);
@@ -668,8 +698,9 @@ void fuxi_perf_start(void)
 {
  unsigned enable = 0;
  (void)PE_parse_boot_argn("fuxiperf",&enable,sizeof(enable));
- if (enable != 1 || fp_started) return;
+ if ((enable != 1 && enable != 2) || fp_started) return;
  fp_started = 1;
+ fp_wide = enable == 2;
  (void)PE_parse_boot_argn("fuxitp",&fp_pressure_enabled,sizeof(fp_pressure_enabled));
  fp_pressure_enabled = fp_pressure_enabled == 1;
  nanoseconds_to_absolutetime(10*NSEC_PER_SEC,&fp_pressure_dwell);

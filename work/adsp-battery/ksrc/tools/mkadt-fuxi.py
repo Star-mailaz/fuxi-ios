@@ -31,13 +31,58 @@ MEM_SIZE = BANK_SIZE - GPU_SIZE
 LEGACY_SIZE = 0x40000000
 FB, FB_SIZE = 0xb8000000, 0x02b00000
 GICD, GICR, GICR_SIZE = 0x17100000, 0x17180000, 0x200000
+PROFILE_RAM_SKU = '12g'
+
+
+def configure_ram(layout):
+    global BANK_SIZE, GPU_BASE, MEM_SIZE
+    banks = {'full': 0x140000000, '9g': 0x240000000}
+    if layout not in banks:
+        raise ValueError('unsupported Fuxi RAM layout')
+    BANK_SIZE = banks[layout]
+    GPU_BASE = PHYS_BASE + BANK_SIZE - GPU_SIZE
+    MEM_SIZE = BANK_SIZE - GPU_SIZE
+
+
+def validate_ram_sku(nodes, requested='auto'):
+    if requested not in ('auto', '8g', '12g'):
+        raise ValueError('unsupported Fuxi physical RAM SKU')
+    raw = nodes.get('/memory', {}).get('ddr_size')
+    if not isinstance(raw, bytes) or len(raw) != 4:
+        raise ValueError('live FDT needs an explicit u32 /memory/ddr_size; do not infer a SKU from usable RAM')
+    capacity = struct.unpack('>I', raw)[0]
+    if capacity not in (8, 12):
+        raise ValueError('live FDT has an unsupported Fuxi physical RAM SKU')
+    actual = f'{capacity}g'
+    if requested not in ('auto', actual):
+        raise ValueError(f'requested RAM SKU {requested} differs from live FDT {actual}')
+    if actual != PROFILE_RAM_SKU:
+        raise ValueError('8GB Fuxi needs its own measured RAM/GPU profile; the 12GB layout is not portable')
+    return actual
+
+
+def memory_contains(ranges, start, length):
+    if start < 0 or length <= 0 or start + length > 1 << 64:
+        return False
+    cursor = start
+    end = start + length
+    for base, size in sorted(ranges):
+        if base < 0 or size < 0 or base + size > 1 << 64:
+            return False
+        if base > cursor:
+            break
+        if base + size > cursor:
+            cursor = base + size
+        if cursor >= end:
+            return True
+    return False
 
 
 def setprop(node, name, value):
     node.props = [(k, f, value if k == name else v) for k, f, v in node.props]
 
 
-def validate_live(path, ufs_readonly=False):
+def validate_live(path, ufs_readonly=False, ram_sku='auto'):
     # Validate the entire used bank, including GPU scratch, against reservations.
     spec = importlib.util.spec_from_file_location('fuxi_fdt', Path(__file__).with_name('fuxi-inspect-dtb.py'))
     fdt = importlib.util.module_from_spec(spec)
@@ -45,11 +90,12 @@ def validate_live(path, ufs_readonly=False):
     nodes, reservations, _ = fdt.parse(path.read_bytes())
     if b'fuxi' not in nodes['/'].get('model', b'').lower():
         raise ValueError('live FDT does not identify a Fuxi board')
+    actual_sku = validate_ram_sku(nodes, ram_sku)
     memory = nodes.get('/memory', {}).get('reg', b'')
     if len(memory) % 16:
         raise ValueError('unexpected /memory cell layout')
     ranges = list(struct.iter_unpack('>QQ', memory))
-    if not any(base <= PHYS_BASE and PHYS_BASE + BANK_SIZE <= base + size for base, size in ranges):
+    if not memory_contains(ranges, PHYS_BASE, BANK_SIZE):
         raise ValueError('requested XNU RAM is outside advertised memory')
     inventory = fdt.describe(nodes, reservations)['nodes']
     for name, props in inventory.items():
@@ -72,6 +118,10 @@ def validate_live(path, ufs_readonly=False):
     splash = nodes.get('/reserved-memory/splash_region', {}).get('reg')
     if splash != struct.pack('>QQ', FB, FB_SIZE):
         raise ValueError('splash reservation differs from the measured Fuxi map')
+    return {'ram_sku': actual_sku, 'profile_ram_sku': PROFILE_RAM_SKU,
+            'source_sku_verified': True, 'runtime_sku_verified': False,
+            'xnu_usable_bytes': MEM_SIZE, 'gpu_scratch_base': GPU_BASE,
+            'gpu_scratch_bytes': GPU_SIZE}
 
 
 def root_extent_props(path, root_bytes):
@@ -91,7 +141,9 @@ def root_extent_props(path, root_bytes):
             ('fuxi-root-blocks', struct.pack('<Q', root_bytes // 4096))]
 
 
-def build(ufs_readonly=False, root_props=(), smp=False, gpu_reserve=False, mem_size=MEM_SIZE):
+def build(ufs_readonly=False, root_props=(), smp=False, gpu_reserve=False, mem_size=None):
+    if mem_size is None:
+        mem_size = MEM_SIZE
     mkadt.HIGH_PHYS_BASE, mkadt.HIGH_MEM_SIZE = PHYS_BASE, mem_size
     mkadt.GICD, mkadt.GICR, mkadt.GICR_SIZE = GICD, GICR, GICR_SIZE
     mkadt.FB, mkadt.FB_SIZE = FB, FB_SIZE
@@ -108,6 +160,7 @@ def build(ufs_readonly=False, root_props=(), smp=False, gpu_reserve=False, mem_s
     setprop(chosen, 'firmware-version', b'fuxi-shim\0')
     setprop(chosen, 'system-firmware-version', b'fuxi-shim\0')
     setprop(chosen, 'unique-chip-id', struct.pack('<Q', 0x4655584900000001))
+    chosen.props.append(('fuxi,ram-sku', 0, struct.pack('<I', 12)))
     chosen.props += [(k, 0, v) for k, v in root_props]
     if gpu_reserve:
         chosen.props.append(('fuxi-gpu-memory', 0, struct.pack('<2Q', GPU_BASE, GPU_SIZE)))
@@ -200,15 +253,23 @@ def ensure_mac_addresses(root):
     return root
 
 
-def reserve_gpu(root, mem_size=MEM_SIZE):
+def reserve_gpu(root, mem_size=None):
     """Preserve an integration ADT's identity/root extents while excluding scratch."""
+    if mem_size is None:
+        mem_size = MEM_SIZE
     chosen = next(n for n in root.children if n.name == 'chosen')
+    sku = chosen.prop('fuxi,ram-sku')
+    if sku is not None and sku != struct.pack('<I', 12):
+        raise ValueError('template ADT physical RAM SKU differs from the 12GB profile')
     if (struct.unpack('<Q', chosen.prop('dram-base'))[0] != PHYS_BASE or
-            struct.unpack('<Q', chosen.prop('dram-size'))[0] not in (MEM_SIZE, LEGACY_SIZE, 0x30000000)):
+            struct.unpack('<Q', chosen.prop('dram-size'))[0] not in
+            (0x13e000000, 0x23e000000, LEGACY_SIZE, 0x30000000)):
         raise ValueError('template ADT has unexpected RAM geometry')
     setprop(chosen, 'dram-size', struct.pack('<Q', mem_size))
     chosen.props = [(k, f, v) for k, f, v in chosen.props if k != 'fuxi-gpu-memory']
     chosen.props.append(('fuxi-gpu-memory', 0, struct.pack('<2Q', GPU_BASE, GPU_SIZE)))
+    if sku is None:
+        chosen.props.append(('fuxi,ram-sku', 0, struct.pack('<I', 12)))
     return root
 
 
@@ -222,7 +283,10 @@ def main():
     ap.add_argument('--template', type=Path, help='preserve an existing integration ADT; requires --gpu-reserve')
     ap.add_argument('--gpu-reserve', action='store_true', help='declare the top-of-bank 32 MiB GPU scratch (always excluded from XNU)')
     ap.add_argument('--smp',action='store_true',help='add cores 2-7 (cpu@100 stays with the USB monitor)')
-    ap.add_argument('--ram-layout', choices=('full', '1g'), default='full', help='full = 5088 MiB; 1g = original 1 GiB XNU window')
+    ap.add_argument('--ram-layout', choices=('full', '1g', '9g'), default='full',
+                    help='full = 5088 MiB; 1g = original window; 9g = 9184 MiB, requires matching kernel/loader')
+    ap.add_argument('--ram-sku', choices=('auto', '8g', '12g'), default='auto',
+                    help='physical device SKU from live FDT; 8GB requires a separate measured profile')
     ap.add_argument('--product-haptics', action='store_true', help='add /product/haptics copied from the D22AP tree')
     ap.add_argument('--product-camera', action='store_true', help='add an empty /product/camera node (no flash)')
     ap.add_argument('--display-gamut', choices=('P3', 'sRGB'), help='set /product artwork-display-gamut (sRGB: no deep colour surfaces)')
@@ -230,7 +294,8 @@ def main():
     ap.add_argument('--swap-hist', action='store_true', help='disp0 fuxi,swap-hist=1: log SwapEnd interval histogram per SWEET FB stats window')
     ap.add_argument('--d22ap-adt', type=Path, default=Path(mkadt.D22AP_ADT), help='real D22AP device tree (not in git)')
     args = ap.parse_args()
-    mem_size = MEM_SIZE if args.ram_layout == 'full' else LEGACY_SIZE
+    configure_ram('full' if args.ram_layout == '1g' else args.ram_layout)
+    mem_size = LEGACY_SIZE if args.ram_layout == '1g' else MEM_SIZE
     try:
         root_props = ()
         if args.root_extents:
@@ -249,7 +314,7 @@ def main():
             root = set_display_gamut(root, args.display_gamut)
         root = set_display_options(root, args.refresh_mhz, args.swap_hist)
         has_ufs = any(n.name == 'fuxi-ufs' for n in root.children)
-        validate_live(args.live_fdt, has_ufs)
+        validate_live(args.live_fdt, has_ufs, args.ram_sku)
         blob = adt.serialize(root)
     except (ValueError, KeyError, struct.error, OSError) as error:
         ap.exit(1, str(error) + '\n')

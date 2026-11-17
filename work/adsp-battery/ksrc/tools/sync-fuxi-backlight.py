@@ -10,7 +10,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / 'xnu/fuxi-backlight'
 PATCH = ROOT / 'xnu/patches/0109-fuxi-backlight.patch'
-FILES = ('FuxiBacklight.cpp', 'fuxi_backlight_logic.h')
+FILES = ('FuxiBacklight.cpp', 'fuxi_backlight_logic.h', 'FuxiDsiBacklight.cpp', 'fuxi_dsi_backlight_logic.h')
 BUILD = 'iokit/conf/files.arm64'
 
 
@@ -34,7 +34,8 @@ def expected():
     anchor = next(line for line in before[BUILD].splitlines(True)
                   if line.startswith('iokit/Kernel/arm/SweetFramebuffer.cpp '))
     after = {BUILD: before[BUILD].replace(anchor, anchor +
-        'iokit/Kernel/arm/FuxiBacklight.cpp                                optional iokitcpp\n')}
+        'iokit/Kernel/arm/FuxiBacklight.cpp                                optional iokitcpp\n'
+        'iokit/Kernel/arm/FuxiDsiBacklight.cpp                             optional iokitcpp\n')}
     for name in FILES:
         path = 'iokit/Kernel/arm/' + name
         before[path] = ''

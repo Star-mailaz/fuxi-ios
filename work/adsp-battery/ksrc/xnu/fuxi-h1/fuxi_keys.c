@@ -39,6 +39,7 @@
 #include <kern/sched_prim.h>
 #include <machine/machine_routines.h>
 #include <pexpert/pexpert.h>
+#include <pexpert/device_tree.h>
 #include "sweet_spmi_bus.h"
 #include "fuxi_key_state.h"
 
@@ -250,7 +251,10 @@ fk_rtc_read_raw(uint16_t apid, uint32_t *secs, uint8_t raw[4])
 		}
 		/* A carry can land mid-read: the LSB must not go backwards. */
 		uint8_t lsb = 0;
-		if (!fk_read(apid, FK_RTC_READ, &lsb) || lsb >= v[0]) {
+		if (!fk_read(apid, FK_RTC_READ, &lsb)) {
+			return false;
+		}
+		if (lsb >= v[0]) {
 			break;
 		}
 		if (i == 1) {
@@ -289,10 +293,25 @@ fk_rtc_set_clock(void)
 		return;
 	}
 	unsigned offset = 0;
-	(void)PE_parse_boot_argn("fuxirtcoffset", &offset, sizeof(offset));
+	const char *from = "none";
+	if (PE_parse_boot_argn("fuxirtcoffset", &offset, sizeof(offset))) {
+		from = "boot-arg";
+	} else {
+		/* 日常命令列已滿 607 字元：同一個量測值改放 ADT /chosen（4-byte little-endian）。 */
+		DTEntry chosen;
+		void *property = NULL;
+		unsigned length = 0;
+		if (SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
+		    SecureDTGetProperty(chosen, "fuxi,rtc-offset", &property, &length) == kSuccess &&
+		    property && length == sizeof(uint32_t)) {
+			const uint8_t *b = property;
+			offset = (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+			from = "adt";
+		}
+	}
 	uint64_t epoch = (uint64_t)secs + (uint64_t)offset;
-	printf("FUXI RTC: apid=%u/ee%u raw %02x %02x %02x %02x counter=%u offset=%u epoch=%llu\n",
-	    apid, owner, raw[0], raw[1], raw[2], raw[3], secs, offset,
+	printf("FUXI RTC: apid=%u/ee%u raw %02x %02x %02x %02x counter=%u offset=%u (%s) epoch=%llu\n",
+	    apid, owner, raw[0], raw[1], raw[2], raw[3], secs, offset, from,
 	    (unsigned long long)epoch);
 	/* 2023-11 .. 2039-09: a blank or bogus RTC must not move the clock. */
 	if (epoch < 1700000000ull || epoch > 2200000000ull) {
@@ -492,13 +511,13 @@ static unsigned fk_touch_loops = 10;
 static void
 fk_swipe(int x0, int y0, int x1, int y1, unsigned ms)
 {
-	unsigned steps = ms / 8u ? ms / 8u : 1u;
+	unsigned steps = ms / 8u ? ms / 8u : 1u; /* steps on an absolute 8 ms grid (125 Hz; a real finger reports every ~8.4 ms) */
+	uint64_t step, due = mach_absolute_time(); nanoseconds_to_absolutetime(8ULL * NSEC_PER_MSEC, &step);
 	for (unsigned i = 0; i <= steps; ++i) {
-		int x = x0 + (x1 - x0) * (int)i / (int)steps;
-		int y = y0 + (y1 - y0) * (int)i / (int)steps;
+		int x = x0 + (x1 - x0) * (int)i / (int)steps, y = y0 + (y1 - y0) * (int)i / (int)steps;
 		fuxi_perf_input();
 		sweet_hid_touch(0, 1, x, y);
-		fk_script_sleep(8);
+		due += step; uint64_t now = mach_absolute_time(); if (due > now) { (void)assert_wait_deadline(&fk_script_chan, THREAD_UNINT, due); thread_block(THREAD_CONTINUE_NULL); } else due = now; /* late: no burst */
 	}
 	sweet_hid_touch(0, 0, x1, y1);
 }
@@ -575,22 +594,42 @@ fk_taps_nums(const char *p, long *out, int max, int *count)
 	return p;
 }
 
+static int
+fk_taps_command(char *command, size_t capacity)
+{
+	if (PE_parse_boot_argn("fuxitapcmd", command, (int)capacity)) {
+		return 1;
+	}
+	DTEntry chosen;
+	void *property = NULL;
+	unsigned length = 0;
+	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess ||
+	    SecureDTGetProperty(chosen, "fuxi,tapcmd", &property, &length) != kSuccess ||
+	    !property || length < 2 || length > capacity ||
+	    strnlen(property, length) != length - 1) {
+		return 0;
+	}
+	memcpy(command, property, length);
+	printf("FUXI TAPS: using ADT command (%u bytes)\n", length);
+	return 1;
+}
+
 static void
 fk_taps(void *arg, wait_result_t wr)
 {
 	unsigned delay = (unsigned)(uintptr_t)arg;
 	unsigned shots = 0;
 	const char *p;
-	char cmds[400];
+	char cmds[400]; /* fuxitapcmd=@1: page 2, open Settings (row 1 col 1 there), scroll it, go home, back to page 1 (a user's session); @2: the slow home drag; @3: open Settings from home page 1 (row 2 col 1, the default layout) */ static const char *const fk_taps_presets[] = {"s540,2390,540,999,99;s900,1200,180,1200,300;t148,285;w800;s540,1900,540,700,300;s540,1900,540,700,300;s540,700,540,1900,300;s540,1900,540,700,300;s540,2390,540,999,99;s180,1200,900,1200,300", "s540,2390,540,999,99;s900,999,180,999,8000;s180,999,900,999,8000", "s540,2390,540,999,99;t148,570;w800;s540,1900,540,700,300;s540,1900,540,700,300;s540,700,540,1900,300;s540,1900,540,700,300;s540,2390,540,999,99;s900,1200,180,1200,300;s180,1200,900,1200,300"};
 
 	(void)wr;
-	if (!PE_parse_boot_argn("fuxitapcmd", cmds, sizeof(cmds))) {
+	if (!fk_taps_command(cmds, sizeof(cmds))) {
 		printf("FUXI TAPS: fuxitapcmd missing\n");
 		(void)thread_terminate(current_thread());
 		thread_block(THREAD_CONTINUE_NULL);
 		return;
 	}
-	unsigned loops = 1;
+	unsigned loops = 1; if (cmds[0] == '@' && cmds[1] >= '1' && cmds[1] <= '3' && !cmds[2]) strlcpy(cmds, fk_taps_presets[cmds[1] - '1'], sizeof(cmds));
 	(void)PE_parse_boot_argn("fuxitapsloop", &loops, sizeof(loops));
 	if (loops < 1) {
 		loops = 1;
@@ -621,10 +660,10 @@ fk_taps(void *arg, wait_result_t wr)
 		}
 		if (op == 't' && n >= 2) {
 			printf("FUXI TAPS: tap %ld,%ld\n", v[0], v[1]);
-			fuxi_perf_input();
-			sweet_hid_touch(0, 1, (int)v[0], (int)v[1]);
-			fk_script_sleep(80);
-			sweet_hid_touch(0, 0, (int)v[0], (int)v[1]);
+			fk_swipe((int)v[0], (int)v[1], (int)v[0], (int)v[1], 96); /* held in place, reporting every 8 ms */
+			/* a real finger reports every ~8.4 ms while down; a lone down, 80 ms of silence and an up */
+			/* opened no app in the tours or in fuxitapcmd=@1 (no exec Preferences) */
+			;
 			fk_script_sleep(1200);
 			printf("FUXI TOUR: shot %u step\n", ++shots);
 		} else if (op == 's' && n >= 4) {
@@ -668,14 +707,16 @@ fk_taps(void *arg, wait_result_t wr)
  * the General and About rows in Settings. Device tests only (synthetic touch).
  */
 static unsigned fk_tour_hold = 45, fk_tour_general = 2100, fk_tour_about = 400;
+/* Set by the tour's last step; read by bsd/dev/fuxi_adsp_battery.c, which ignores it unless fuxi,adsp=4 (a test loader). */
+volatile uint32_t fuxi_tour_battery_test;
 
 static void
 fk_tap(int x, int y)
 {
-	fuxi_perf_input();
-	sweet_hid_touch(0, 1, x, y);
-	fk_script_sleep(80);
-	sweet_hid_touch(0, 0, x, y);
+	fk_swipe(x, y, x, y, 96); /* held in place, reporting every 8 ms like a finger (see fk_taps 't') */
+	;
+	;
+	;
 }
 
 static void
@@ -739,6 +780,34 @@ fk_tour(void *arg, wait_result_t wr)
 	fk_swipe(1000, 10, 1000, 1100, 250);    /* Control Center */
 	fk_script_sleep(2000);
 	fk_tour_shot(&shot, "control-center");
+	/* The brightness slider (iOS 16 Control Center at 1080x2400: x 564-768, y 930-1384): drag it down, then back up, so a
+	 * fuxibacklight=4 boot logs CoreBrightness's levels and the panel's DCS 0x51 for each. The slider follows the drag
+	 * relative to where it starts, so 360 px is most of its 454 px travel either way. */
+	printf("FUXI TOUR: brightness slider down\n");
+	fk_swipe(666, 1000, 666, 1360, 700);
+	fk_script_sleep(2000);
+	fk_tour_shot(&shot, "brightness-low");
+	printf("FUXI TOUR: brightness slider up\n");
+	fk_swipe(666, 1360, 666, 1000, 700);
+	fk_script_sleep(2000);
+	fk_tour_shot(&shot, "brightness-high");
+	/* 2026-11-16 daily use: the slider worked twice and then stopped. Drag it eight more times, fast and slow, short and long, so
+	 * the log shows whether every level still reaches the panel; then leave it low and take a shot, and high again. */
+	for (unsigned i = 0; i < 8; ++i) {
+		const int span = (i & 1) ? 200 : 360, ms = (i & 2) ? 250 : 900;
+		printf("FUXI TOUR: brightness drag %u down %d px in %d ms\n", i + 1, span, ms);
+		fk_swipe(666, 1000, 666, 1000 + span, ms);
+		fk_script_sleep(700);
+		fk_swipe(666, 1000 + span, 666, 1000, ms);
+		fk_script_sleep(700);
+	}
+	printf("FUXI TOUR: brightness slider down (after the drags)\n");
+	fk_swipe(666, 1000, 666, 1360, 700);
+	fk_script_sleep(2000);
+	fk_tour_shot(&shot, "brightness-low-again");
+	printf("FUXI TOUR: brightness slider up (after the drags)\n");
+	fk_swipe(666, 1360, 666, 1000, 700);
+	fk_script_sleep(2000);
 	/* A home gesture on another page only returns to page 1 the second time. */
 	fk_tour_home();
 	fk_tour_home();
@@ -758,6 +827,16 @@ fk_tour(void *arg, wait_result_t wr)
 	fk_tour_app(&shot, 410, 860, "calendar");
 	fk_tour_home();
 	fk_tour_app(&shot, 670, 860, "photos");
+	fk_tour_home();
+	/* fuxi,adsp=4 test loaders: the battery source switches to a staged "57%, unplugged" reading (fuxi_adsp_battery.c); after
+	 * SweetBattery's next 30 s poll, Control Center's battery percentage and the status bar show whether iOS followed it. */
+	printf("FUXI TOUR: battery staged unplug (shown only with fuxi,adsp=4)\n");
+	__atomic_store_n(&fuxi_tour_battery_test, 1u, __ATOMIC_RELEASE);
+	fk_script_sleep(40000);
+	fk_tour_shot(&shot, "battery-staged-home");
+	fk_swipe(1000, 10, 1000, 1100, 250);    /* Control Center: the percentage is shown top right */
+	fk_script_sleep(2000);
+	fk_tour_shot(&shot, "battery-staged-cc");
 	fk_tour_home();
 	printf("FUXI TOUR: done\n");
 	(void)thread_terminate(current_thread());

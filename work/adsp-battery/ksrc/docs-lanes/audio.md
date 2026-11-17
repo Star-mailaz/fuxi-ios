@@ -273,6 +273,33 @@ sent, capture 200 of 200 periods). Sheng is an SM8550-class board, so most of th
 
 ## 9. Steps, dependencies, firmware and gates
 
+2026-11-17 update: the production ADSP owner in `xnu/fuxi-adsp/fuxi_adsp.c` already boots the DSP,
+serves QRTR and publishes battery data. `fuxi_audio_spf.c` now registers a third, query-only client on
+`adsp_apps` (512-byte receive intents, count 20, remote initiator). ADT `/chosen` `fuxi,audio-spf=1`
+or `fuxiaudiospf=1` enables it; absent, malformed or other values leave it off. Patch 0117 includes
+this client and the strict `fuxi-audio-prep` codec. The older P-AU plan below is historical.
+
+The owner polls the client outside GLINK callbacks. Callbacks only validate and retain bounded reply
+state; they never send or wait. The channel has a 15-second deadline. Like the Sheng reference's
+`dspReady`, the client then asks at most 100 times: each GET_SPF_STATE query has its own token and a
+one-second reply deadline, and a not-ready state, a remote error or a timeout schedules the next query
+no sooner than 100 ms later. State 1 ends the probe. Route, token, opcode and payload validation precede
+acceptance, so a late reply to an earlier token is rejected. Disconnect and queue failure stop the probe.
+The console prints the first answer and a final summary with the query, not-ready, error and timeout
+counts, not one line per query. This preparation has
+production ASan/UBSan coverage in `tools/test-fuxi-audio-spf.py`, including the disabled gate and
+callbacks being forbidden from sending. Hardware response remains unverified. It does not configure
+speaker graphs, PRM clocks, amplifiers, microphones or an iOS audio device.
+
+The first device reply carried route word `0x00010203`, with client data 1. The
+[AudioReach GPR specification](https://audioreach.github.io/design/gpr_design.html)
+defines bits 16–19 as client data and bits 20–31 as reserved; Linux's older `reserved:16`
+declaration is insufficient to define validation for this firmware. The codec now reports the
+four client bits and still rejects every true reserved bit. Route, token, opcode, payload and
+length checks remain enforced. A separate opt-in value 2 sends the 24-byte bare query used by
+the pinned Sheng reference, allowing comparison with value 1's 40-byte APM query without
+another kernel build. Neither format has yet established SPF readiness on Fuxi.
+
 Sources and licenses: UniXNU-sheng commit `08cde20edc32` (BSD-2-Clause-Patent), files under `package/` named in each ported
 header. hackios (APSL) was read for ideas only (its single RSC mutex).
 
@@ -321,6 +348,16 @@ only if the ADT cannot carry it. The HAL plug-in stays opt-in through `fuxi-sys-
 ### Blockers and facts needed
 
 1. Fuxi ACDB/topology ids for the TDM speaker and the capture path (files above), plus the AudioReach TDM interface param id and layout.
+   2026-11-17: the stock files were read from the phone's Android side (read-only, hashed before and after each transfer, kept in
+   `work/adsp-battery/android-audio-config-1117`, not in git; `statusbar-fix/fetch-android-audio-config.py`). They are the ACDB
+   `odm/etc/acdbdata/Tutu/Tutu_acdb_cal.acdb` and `Tutu_workspaceFileXml.qwsp`, `usecaseKvManager.xml`, `kvh2xml.xml`,
+   `card-defs.xml`, `backend_conf.xml` and `sku_kalama/{resourcemanager,mixer_paths}_kalama_mtp.xml` plus the overlays.
+   - Stock `resourcemanager_kalama_mtp.xml`: `PAL_DEVICE_OUT_SPEAKER` uses `TDM-LPAIF-RX-SECONDARY` at 48 kHz, 2 ch, 24 bit,
+     with `speaker_protection_enabled` 0, so protection runs on the amp DSP.
+   - `backend_conf.xml` agrees: `TDM-LPAIF-RX-SECONDARY` ch=2 bits=24.
+   - `mixer_paths_overlay_static.xml` sets T/B `DSP1 Firmware` "Protection", `AMP PCM Gain` 18, `Digital PCM Volume` 817 and
+     `Fast Use Case Delta File` `T-music.txt`/`B-music.txt`.
+   - The amp DSP firmware and tuning files live under `/vendor/firmware` and have not been pulled yet.
 2. CS35L41 register init for ASP RX1 direct (clock/PLL reference from the TDM SCLK, ASP enables, gain, global enable, DEVID check).
    `ShengCs35l43.c` shows the shape only; Linux's driver is GPL and is ideas only. Needed: a non-GPL register list or a carefully
    reconstructed one verified by DEVID reads and PLL-lock status before any audio.

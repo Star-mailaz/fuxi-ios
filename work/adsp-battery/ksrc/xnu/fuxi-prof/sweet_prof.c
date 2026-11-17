@@ -15,6 +15,7 @@ extern void sweet_prof_task(task_t task,int pid);
 void sweet_prof_start(void);
 struct sp_target { task_t task; int pid; };
 static const char *sp_target_name="backboardd";
+static char sp_named_target[32];
 static int sp_find(proc_t p,void *arg) {
  struct sp_target *target=arg;char name[32];proc_name(proc_pid(p),name,sizeof(name));
  if(!target->task && !strcmp(name,sp_target_name)) {
@@ -38,8 +39,22 @@ void sweet_prof_start(void) {
  /* sweetprof=1: start after 60 s; sweetprof=N (2..3600): start after N s. 10000+N samples SpringBoard
     instead; its lines keep the "PROF backboardd" prefix so the existing parsers still match. */
  if(!PE_parse_boot_argn("sweetprof",&enabled,sizeof(enabled)) || !enabled)return;
+ sp_target_name="backboardd";sp_delay=60;
  if(enabled>=10000 && enabled<=13600){sp_target_name="SpringBoard";enabled-=10000;if(!enabled)enabled=1;}
  if(enabled>3600)return;
+ char requested[33]={0};
+ if(PE_parse_boot_argn("sweetprofname",requested,sizeof(requested))) {
+  size_t length=strnlen(requested,sizeof(requested));
+  if(!length || length>=sizeof(sp_named_target)){printf("PROF invalid target name\n");return;}
+  for(size_t index=0;index<length;index++) {
+   char character=requested[index];
+   if(!((character>='a' && character<='z') || (character>='A' && character<='Z') ||
+        (character>='0' && character<='9') || character=='.' || character=='_' || character=='-')) {
+    printf("PROF invalid target name\n");return;
+   }
+  }
+  memcpy(sp_named_target,requested,length+1);sp_target_name=sp_named_target;
+ }
  if(enabled>1)sp_delay=enabled;
  if(kernel_thread_start(sp_worker,NULL,&thread)==KERN_SUCCESS)thread_deallocate(thread);
 }

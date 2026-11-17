@@ -10,7 +10,7 @@
 #define FG_ABI_PA_BITS 36u /* Fuxi ID2.OAS=1; existing present mapper has the same limit. */
 #define FG_ABI_MAX_BYTES (UINT64_C(1) << 28)
 /* Internal quotas, independent of the unchanged per-object wire limit. */
-#define FG_ABI_MAX_BOS 1024u
+#define FG_ABI_MAX_BOS 4096u
 #define FG_ABI_MAX_WIRED_BYTES (UINT64_C(768) << 20)
 #define FG_ABI_CONTIG_TRY_BYTES (UINT64_C(1) << 20)
 #define FG_ABI_MAX_IMPORTS 512u

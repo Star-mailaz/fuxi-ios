@@ -1,0 +1,81 @@
+--- a/pexpert/gen/bootargs.c
++++ b/pexpert/gen/bootargs.c
+@@ -187,13 +187,66 @@
+ 	return arg_found;
+ }
+ 
++#if defined(FUXI)
++/*
++ * Fuxi (patch 0121): the iOS 16 command line holds 607 bytes. A Wi-Fi switch
++ * (a name beginning fuxiwlan or fuxiwifi) that is not on it may come from the
++ * ADT string /chosen fuxi,args, in the same "name=value name=value" form; the
++ * command line wins. The property is 2..256 bytes and ends in its only NUL.
++ * Before the device tree is up the lookup fails and nothing changes.
++ */
++static char *
++fuxi_adt_args(const char *arg_string)
++{
++	DTEntry chosen;
++	void const *prop;
++	unsigned int size, i;
++	const char *text;
++
++	if (strncmp(arg_string, "fuxiwlan", 8) != 0 && strncmp(arg_string, "fuxiwifi", 8) != 0) {
++		return NULL;
++	}
++	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess ||
++	    SecureDTGetProperty(chosen, "fuxi,args", &prop, &size) != kSuccess ||
++	    size < 2 || size > 256) {
++		return NULL;
++	}
++	text = (const char *)prop;
++	for (i = 0; i + 1 < size; i++) {
++		if (text[i] == '\0') {
++			return NULL;
++		}
++	}
++	if (text[size - 1] != '\0') {
++		return NULL;
++	}
++	return __DECONST(char *, text);
++}
++
++static boolean_t
++fuxi_parse_boot_argn(const char *arg_string, void *arg_ptr, int max_len, boolean_t force_string)
++{
++	char *adt;
++
++	if (PE_parse_boot_argn_internal(PE_boot_args(), arg_string, arg_ptr, max_len, force_string)) {
++		return TRUE;
++	}
++	adt = fuxi_adt_args(arg_string);
++	return adt != NULL && PE_parse_boot_argn_internal(adt, arg_string, arg_ptr, max_len, force_string);
++}
++#endif
++
+ boolean_t
+ PE_parse_boot_argn(
+ 	const char      *arg_string,
+ 	void            *arg_ptr,
+ 	int                     max_len)
+ {
++#if defined(FUXI)
++	return fuxi_parse_boot_argn(arg_string, arg_ptr, max_len, FALSE);
++#else
+ 	return PE_parse_boot_argn_internal(PE_boot_args(), arg_string, arg_ptr, max_len, FALSE);
++#endif
+ }
+ 
+ boolean_t
+@@ -202,7 +255,11 @@
+ 	char            *arg_ptr,
+ 	int                     strlen)
+ {
++#if defined(FUXI)
++	return fuxi_parse_boot_argn(arg_string, arg_ptr, strlen, TRUE);
++#else
+ 	return PE_parse_boot_argn_internal(PE_boot_args(), arg_string, arg_ptr, strlen, TRUE);
++#endif
+ }
+ 
+ #if defined(CONFIG_XNUPOST)

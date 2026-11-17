@@ -74,6 +74,18 @@
        return vk_error(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE);
     VkResult collected = darwin_collect_retired(dev);
     if (collected != VK_SUCCESS)
+@@ -435,7 +441,10 @@
+    kern_return_t kr = dw_call(NativeAdrenoMethodBoImport, &import, sizeof(import), &reply, sizeof(reply));
+    if (kr != KERN_SUCCESS) {
+       darwin_free_iova(dev, iova, size);
+-      return vk_errorf(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE, "BoImport failed: 0x%x", kr);
++      const VkResult failure =
++         kr == kIOReturnNoMemory || kr == kIOReturnNoResources
++            ? VK_ERROR_OUT_OF_DEVICE_MEMORY : VK_ERROR_INVALID_EXTERNAL_HANDLE;
++      return vk_errorf(dev, failure, "BoImport failed: 0x%x", kr);
+    }
+    NativeAdrenoAbiBoMap map = {.handle = reply.handle, .iova = iova, .permissions = 3u, .writeback = 0, .shareability = 2};
+    NativeAdrenoAbiBoMapReply mapped = {};
 --- a/src/freedreno/vulkan/tu_formats.cc
 +++ b/src/freedreno/vulkan/tu_formats.cc
 @@ -745,6 +745,10 @@

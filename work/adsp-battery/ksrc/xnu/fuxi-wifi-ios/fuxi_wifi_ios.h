@@ -32,5 +32,6 @@ struct fuxi_wifi_backend {
 #ifdef KERNEL
 bool fuxi_wifi_ios_attach(const struct fuxi_wifi_backend *backend);
 void fuxi_wifi_ios_init(void);
+bool fuxi_wifi_ios_native_ready(void);
 #endif
 #endif

@@ -11,6 +11,18 @@
 extern void FuxiNetworkStackStart(void);
 static const struct fuxi_wifi_backend *backend;
 static bool enabled;
+static bool native;
+static LCK_GRP_DECLARE(ios_group, "fuxi-wifi-ios");
+static LCK_MTX_DECLARE(ios_lock, &ios_group);
+
+bool
+fuxi_wifi_ios_native_ready(void)
+{
+	lck_mtx_lock(&ios_lock);
+	bool ready = enabled && native;
+	lck_mtx_unlock(&ios_lock);
+	return ready;
+}
 
 static bool
 transmit(mbuf_t packet, size_t length)
@@ -38,6 +50,7 @@ fuxi_wifi_ios_attach(const struct fuxi_wifi_backend *ops)
 		return false;
 	}
 	backend = ops;
+	if (native) { link.name = "WCN7850-ath12k"; }
 	memcpy(link.address, ops->station.address, sizeof(link.address));
 	ops->start(&input);
 	fuxi_wifi_sta_attach(&ops->station);
@@ -193,10 +206,17 @@ fuxi_wifi_ios_init(void)
 {
 	int on = 0;
 	PE_parse_boot_argn("fuxiwifiios", &on, sizeof(on));
-	if (on != 1 || enabled) {
+	if ((on != 1 && on != 2) || enabled) {
 		return;
 	}
+	lck_mtx_lock(&ios_lock);
+	native = on == 2;
 	enabled = true;
+	lck_mtx_unlock(&ios_lock);
+	if (native) {
+		printf("FUXI WIFI IOS: enabled, awaiting native WCN7850 backend\n");
+		return;
+	}
 	printf("FUXI WIFI IOS: enabled, synthetic backend; Apple80211 16.7 ABI unverified\n");
 	(void)fuxi_wifi_ios_attach(&fake_backend);
 }

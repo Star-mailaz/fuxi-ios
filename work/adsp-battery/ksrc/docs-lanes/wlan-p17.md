@@ -1,6 +1,8 @@
 # P17: opt-in probes for the silent WLAN_MODE (WCN7850)
 
-Status: host-tested only. Every device effect is **not yet observed**.
+Status: host-tested; CLKCHECK and CLKON were observed on the device in
+trip 26 (see "Device evidence" below). Every other device effect,
+including BIGMEM, is **not yet observed**.
 Blocker context: firmware reaches AMSS, INI and CFG reply OK, WLAN_MODE
 (0x22) is consumed and never answered (see wlan-w16.md, wlan-bt.md).
 
@@ -17,8 +19,9 @@ All behaviour is off by default. The switches are bits of the existing
 | 0x040 | CLKCHECK | before any WLAN power write (step 1), read PMK8550 gpio3 (SID 0, PPID 0x0ba) over SPMI arbiter v7 and log it. Read only. Works with plain `fuxiwlan=N`, no QMI needed. |
 | 0x080 | CLKON | as CLKCHECK, then if the pin is not an enabled function-2 output, EE 0 owns it and it is an LV/MV pin: write 0x42=5, 0x41=0, 0x44=2, 0x40=1, 0x46=0x80 on its RW channel and read back. Volatile PMIC state. |
 | 0x100 | ERRDEC | wherever the WLFW diagnostics print the BHI words (W13 RESPOND_MEM, W15 MODE timeout), also classify ERRCODE/ERRDBG1..3; if the EE is RDDM and the RX sink exists (`fuxiwlanvec=rddm`), wait up to 1 s for RXVECSTATUS complete and scan the dump for assert/fatal text. |
+| 0x200 | BIGMEM | W13+ (`fuxiwlanqrtr>=3`) grants the firmware's first REQUEST_MEM as it stands (two chunks of about 7 and 8 MiB) instead of answering with zero segments to negotiate chunks of at most 2 MiB. Each target keeps the W13 power-of-two IOVA alignment (8 and 16 MiB here); backing is wired, not physically contiguous, mapped with 4 KiB leaves as before. Android cnss2 and mainline ath12k grant the large chunks directly; before W13 this lane did too, but only with 16 KiB-aligned IOVAs (try12), so large chunks with proper alignment were never run. |
 
-Valid range is 0..0x1ff with low bits != 3. A suggested first run is
+Valid range is 0..0x3ff with low bits != 3. A suggested first run is
 `fuxiwlanmlo=0x17d` (PHY_CAP, 0x33, MLOALL, PHY17, DMAALIGN, CLKCHECK, ERRDEC)
 at `fuxiwlanqrtr=5`; add 0x80 only after the CLKCHECK line shows state 0.
 
@@ -34,8 +37,28 @@ at `fuxiwlanqrtr=5`; add 0x80 only after the CLKCHECK line shows state 0.
 - `FUXI WLAN: P17 phy cap TLV 0x17 len L value 0x...`
 - `FUXI WLAN: P17 dma align size 0x.. align 0x.. IOVA 0x.. -> 0x..` (one per allocation; "target allocation/NC/map failed" would mean the pool ran out of space)
 - `FUXI WLAN: P17 <label> ERRCODE 0xcafecace hi16 0xcafe ... class: ...` (and ERRDBG1..3), `P17 rddm upload RXVECSTATUS ...`, `P17 rddm text +0x...: ...`, `P17 rddm scan ... messages`, `P17 rddm-rec 000: ...`
+- `FUXI WLAN: P17 bigmem grants n=2 total=... without zero-segment negotiation; aligned IOVAs` (BIGMEM), followed by two `W12 target segment` lines and no `W13 decline large chunks` line
 
 The success discriminator is unchanged: a matching successful MODE reply.
+
+## Device evidence
+
+Trip 26 (2026-11-16 19:20, temporary `fastboot boot`, OEM firmware
+`WLAN.HMT.1.0.c2-00058.3`, `fuxiwlanmlo=192` = CLKCHECK|CLKON, log
+`native-hw000w18-oem-slpclk-boot-1/boot.log`, SHA256
+`222d0de1ae1477b701971938f82459b667383d172de5166cd74dc36072108241`):
+
+- `P17 sleepclk pmk8550 gpio3 ppid 0xba apid 575 owner ee0 read 1 type 0x10 sub 0x12 mode 0 func 0 en 0x80 state 0`:
+  under XNU the 32 kHz sleep clock pin is **off** when the driver starts.
+- `P17 sleepclk enable writes ok 1 after: read 1 mode 0x1 func 0x2 en 0x80 state 0xff`:
+  CLKON turns it on and the readback agrees.
+- The firmware still does not send FW_READY (step 28 code 0x1c01; EE AMSS,
+  ERRCODE/ERRDBG all `0xcafecace`). The sleep clock alone is therefore not
+  the missing piece on the OEM firmware path. Its effect on the upstream
+  firmware's silent WLAN_MODE is not yet observed.
+- In that run the OEM firmware first asked for 7077888 (type 1) and 8454144
+  (type 4) bytes, was declined, and then asked for 31 chunks of at most
+  512 KiB. BIGMEM exists to test the first request as the single variable.
 
 ## Provenance and caveats
 
@@ -68,6 +91,21 @@ sleep-clock decision and exact write order, exact error-word strings,
 text-scan hits/dedup/format rejection), then reruns the W12 QMI harness
 with 12 added cases whose HOST_CAP bytes (including `33 01 00 01` after
 `27 08 00 ...`) are compared exactly, plus selector validity, IOVA alignment
-in `wl_dma_alloc` and the ERRDEC log lines. SPMI MMIO and the RDDM wait are
+in `wl_dma_alloc` and the ERRDEC log lines. `tools/test-fuxi-wlan-w13.py`
+trial 14 runs BIGMEM against the literal two-chunk request and checks one
+real RESPOND_MEM, power-of-two IOVAs, the mapped leaves and that no
+zero-segment response is sent. SPMI MMIO and the RDDM wait are
 not host-testable. 0099 is regenerated from `xnu/fuxi-wlan/fuxi_wlan.c`
 (mirror check inside the m6/m6o tests).
+
+## ERRDEC target-memory summary (added after trip 29)
+
+Trips 26, 27 and 29 (sleep clock, large chunks, AOP PDC) all end in the same
+silent FW_READY timeout with EE AMSS and no error word. With ERRDEC (0x100)
+set, `wl17_target_summary` now runs on every WLFW timeout and prints, per
+granted REQUEST_MEM segment, how many bytes and 4 KiB pages are non-zero
+(allocations start zeroed), the first/last non-zero offset, the first words
+and up to 12 printable runs of 20+ characters, plus the existing error-text
+scan. It reads only the host's own wired pages and changes no request.
+Purpose: tell "firmware never touched its host memory" from "firmware ran
+and stopped somewhere", and pick up any text it left there.

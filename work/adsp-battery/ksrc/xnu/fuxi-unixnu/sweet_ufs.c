@@ -60,7 +60,11 @@ extern void sweet_touch_init(void);
 extern void fuxi_touch_init(void);
 extern void fuxi_keys_init(void);
 extern void fuxi_wlan_init(void);
+extern void fuxi_adsp_init(void);
 extern void sweet_usb_probe(void);
+#if defined(FUXI)
+static void fx_log_start(void);
+#endif
 
 #define REG_CAP         0x00
 #define REG_IS          0x20
@@ -215,6 +219,29 @@ fx_load_extents(void)
 	fx_root = true;
 	return 0;
 }
+
+/*
+ * Standalone-boot console log (a slot-b boot has no USB, so no live log): ADT /chosen u32 "fuxi,log"=1 (or boot-arg
+ * fuxilog=1) and the GPT partition FX_LOG_PART whose first block Android stamped with "FUXILOG1 STAMPED" at byte 2048
+ * (work/adsp-battery/hw000/fuxi-log.sh stamp); without the stamp nothing is written. Fuxi has no "logdump": "mtdblk" (LUN 0,
+ * 32 MiB) was all zeros on 2026-11-16 and nothing in Android, abl, xbl or uefi names it (block2mtd/mtdoops use "oops"). Area = the partition's first FX_LOG_AREA_BLOCKS 4 KiB
+ * blocks: 0 = SWEETLOG header (version 2, struct fx_log_header) + the stamp, 1..1024 = ring (the console's last 4 MiB),
+ * 1025..2048 = head (its first 4 MiB, frozen once the ring wraps). No other block of any partition is ever written.
+ */
+#define FX_LOG_PART "mtdblk"
+#define FX_LOG_AREA_BLOCKS 2049u
+static const char fx_log_stamp[16] = {'F', 'U', 'X', 'I', 'L', 'O', 'G', '1', ' ', 'S', 'T', 'A', 'M', 'P', 'E', 'D'};
+static uint8_t fx_log_lun;
+static uint64_t fx_log_first;
+static bool fx_log_ok;
+
+/* True only if device blocks [lba, lba+count) of the current LUN lie inside the stamped log area. */
+static bool
+fx_log_write_allowed(uint64_t lba, uint64_t count)
+{
+	return fx_log_ok && su.lun == fx_log_lun && count != 0 && lba >= fx_log_first &&
+	    lba - fx_log_first < FX_LOG_AREA_BLOCKS && count <= FX_LOG_AREA_BLOCKS - (lba - fx_log_first);
+}
 #endif
 
 static LCK_GRP_DECLARE(sweet_ufs_grp, "sweet_ufs");
@@ -301,7 +328,11 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
             (uint64_t)cdb[7]<<8|cdb[8]) && len==((uint32_t)cdb[7]<<8|cdb[8])*UFS_BLOCK;
     bool root_sync=!write && len==0 && su.writable && fx_root && su.lun==0 &&
         cdb_len==10 && cdb[0]==0x35;
-    if (!root_write && !root_sync &&
+    bool log_write=write && cdb_len==10 && cdb[0]==0x2a &&
+        fx_log_write_allowed((uint64_t)cdb[2]<<24|cdb[3]<<16|cdb[4]<<8|cdb[5],
+            (uint64_t)cdb[7]<<8|cdb[8]) && len==((uint32_t)cdb[7]<<8|cdb[8])*UFS_BLOCK;
+    bool log_sync=!write && len==0 && fx_log_ok && su.lun==fx_log_lun && cdb_len==10 && cdb[0]==0x35;
+    if (!root_write && !root_sync && !log_write && !log_sync &&
         (write || !cdb_len || (cdb[0]!=0x00 && cdb[0]!=0x28 && !active_power))) return EROFS;
 #endif
 
@@ -553,6 +584,98 @@ ufs_find_partition(const char *want)
 	printf("SWEET UFS: no GPT partition named \"%s\"\n", want);
 	return ENOENT;
 }
+
+#if defined(FUXI)
+/*
+ * Read-only access to other GPT partitions for in-kernel firmware loaders (bsd/dev/fuxi_adsp.c reads the ADSP images in place
+ * from modem_a). Under sweet_ufs_lock the LUN is switched for one command and restored before the lock is dropped, so root
+ * I/O never sees it; ufs_scsi's FUXI policy refuses every write and every non-READ command off LUN 0 anyway, and the root
+ * partition's bounds (su.first_block / su.nblocks) are never touched. Only LUNs 1-5 (present on Fuxi) are probed, LUN 4 (the
+ * firmware LUN) first. Refused in fuxi_unixnu_ufs=1 mode, which quarantines the host on an unexpected response.
+ */
+static int
+fx_gpt_lookup(const char *want, uint64_t *first, uint64_t *blocks)
+{
+	const uint8_t *b = (const uint8_t *)(su.dma + DMA_BOUNCE);
+	int error = ufs_read_blocks(1, 1);
+	if (error) return error;
+	if (memcmp(b, "EFI PART", 8) != 0) return ENXIO;
+	uint64_t entry_lba;
+	uint32_t nent, esz;
+	memcpy(&entry_lba, b + 72, 8);
+	memcpy(&nent, b + 80, 4);
+	memcpy(&esz, b + 84, 4);
+	if (esz != 128 || nent == 0 || nent * esz > BOUNCE_SIZE) return ENXIO;
+	error = ufs_read_blocks(entry_lba, (nent * esz + UFS_BLOCK - 1) / UFS_BLOCK);
+	if (error) return error;
+	for (uint32_t i = 0; i < nent; i++) {
+		const uint8_t *e = b + i * esz;
+		char name[37];
+		unsigned c;
+		for (c = 0; c < 36; c++) {
+			uint16_t ch = (uint16_t)(e[56 + 2 * c] | e[57 + 2 * c] << 8);
+			if (ch == 0 || ch > 0x7f) break;
+			name[c] = (char)ch;
+		}
+		name[c] = 0;
+		if (strcmp(name, want) != 0) continue;
+		uint64_t lo, hi;
+		memcpy(&lo, e + 32, 8);
+		memcpy(&hi, e + 40, 8);
+		if (hi < lo) return ENXIO;
+		*first = lo;
+		*blocks = hi - lo + 1;
+		return 0;
+	}
+	return ENOENT;
+}
+
+int fuxi_ufs_part_find(const char *name, uint32_t *lun, uint64_t *first, uint64_t *blocks);
+int
+fuxi_ufs_part_find(const char *name, uint32_t *lun, uint64_t *first, uint64_t *blocks)
+{
+	static const uint8_t luns[] = {4, 5, 1, 2, 3};
+	int found = 0;
+	if (!name || !lun || !first || !blocks || !su.ready || su.unixnu) return 0;
+	lck_mtx_lock(&sweet_ufs_lock);
+	uint8_t saved = su.lun;
+	for (unsigned i = 0; i < sizeof(luns) && !found && !su.poisoned; i++) {
+		if (fuxi_ufs_check_idle()) break;
+		su.lun = luns[i];
+		if (!fx_gpt_lookup(name, first, blocks)) {
+			*lun = luns[i];
+			found = 1;
+		}
+		su.lun = saved;
+	}
+	su.lun = saved;
+	lck_mtx_unlock(&sweet_ufs_lock);
+	if (found) printf("FUXI UFS: firmware partition \"%s\" on LUN %u: first block 0x%llx, %llu blocks (read-only)\n",
+	    name, *lun, *first, *blocks);
+	return found;
+}
+
+/* blocks 4 KiB device blocks at an absolute LBA of a firmware LUN into dst; 1 on success. */
+int fuxi_ufs_part_read(uint32_t lun, uint64_t lba, uint32_t blocks, void *dst);
+int
+fuxi_ufs_part_read(uint32_t lun, uint64_t lba, uint32_t blocks, void *dst)
+{
+	int error;
+	if (!dst || lun < 1 || lun > 5 || !blocks || blocks > BOUNCE_SIZE / UFS_BLOCK || !su.ready || su.unixnu) return 0;
+	lck_mtx_lock(&sweet_ufs_lock);
+	uint8_t saved = su.lun;
+	error = fuxi_ufs_check_idle();
+	if (!error) {
+		su.lun = (uint8_t)lun;
+		error = ufs_read_blocks(lba, blocks);
+		su.lun = saved;
+		if (!error) memcpy(dst, (const void *)(su.dma + DMA_BOUNCE), (size_t)blocks * UFS_BLOCK);
+	}
+	su.lun = saved;
+	lck_mtx_unlock(&sweet_ufs_lock);
+	return !error;
+}
+#endif
 
 static int
 ufs_take_over_host(void)
@@ -951,6 +1074,10 @@ sweet_ufs_init(void)
 	fuxi_keys_init();
 	/* WCN7850 PCIe0/MHI probe, boot-arg fuxiwlan (bsd/dev/fuxi_wlan.c). */
 	fuxi_wlan_init();
+	/* Console log to the stamped mtdblk area, for standalone boots (fx_log_start); before the DSP so its bring-up is kept. */
+	fx_log_start();
+	/* Audio DSP (ADSP) and its battery manager, boot-arg fuxiadsp (bsd/dev/fuxi_adsp.c); needs this driver for the firmware. */
+	fuxi_adsp_init();
 #else
 	sweet_log_start();
 	sweet_sample_start();
@@ -1125,6 +1252,178 @@ sweet_log_start(void)
 		thread_deallocate(thread);
 	}
 }
+
+#if defined(FUXI)
+struct fx_log_header {
+	char magic[8];                  /* "SWEETLOG" */
+	uint32_t version, size;         /* 2, ring size */
+	uint64_t total, seq;            /* console bytes so far, flush number */
+	uint64_t head_bytes;            /* console bytes [0, head_bytes) are in the head area */
+	uint32_t boot, flush_secs;      /* previous header's boot + 1 (0 after a fresh stamp), flush period */
+};
+
+static uint32_t fx_log_boot;
+
+/* WRITE(10) of n blocks from the bounce buffer to area block blk; sweet_ufs_lock held. */
+static int
+fx_log_put(uint64_t blk, uint32_t n)
+{
+	uint64_t lba = fx_log_first + blk;
+	uint8_t cdb[10] = {
+		0x2a, 0,
+		(uint8_t)(lba >> 24), (uint8_t)(lba >> 16), (uint8_t)(lba >> 8), (uint8_t)lba,
+		0, (uint8_t)(n >> 8), (uint8_t)n, 0
+	};
+	uint8_t saved = su.lun;
+	int error = EPERM;
+	su.lun = fx_log_lun;
+	if (n && n <= BOUNCE_SIZE / UFS_BLOCK && lba + n - 1 <= UINT32_MAX && fx_log_write_allowed(lba, n)) {
+		error = ufs_scsi(cdb, sizeof(cdb), n * UFS_BLOCK, true);
+	}
+	su.lun = saved;
+	return error;
+}
+
+/* Console bytes [pos, total) to the area starting at block area (ring layout: byte n at offset n % ring size). */
+static int
+fx_log_copy(uint64_t area, uint64_t pos, uint64_t total)
+{
+	void *bounce = (void *)(su.dma + DMA_BOUNCE);
+	int error = 0;
+	while (pos < total && !error) {
+		uint32_t off = (uint32_t)(pos % SWEET_LOG_SIZE);
+		uint32_t blk = off / UFS_BLOCK;
+		uint64_t need = ((uint64_t)off % UFS_BLOCK + (total - pos) + UFS_BLOCK - 1) / UFS_BLOCK;
+		uint32_t n = (uint32_t)MIN(MIN(need, (uint64_t)(SWEET_LOG_SIZE / UFS_BLOCK - blk)),
+		    (uint64_t)(BOUNCE_SIZE / UFS_BLOCK));
+		memcpy(bounce, sweet_log_ring + (uint64_t)blk * UFS_BLOCK, n * UFS_BLOCK);
+		error = fx_log_put(area + blk, n);
+		pos += (uint64_t)(blk + n) * UFS_BLOCK - off;
+	}
+	return error;
+}
+
+static void
+fx_log_thread(__unused void *arg, __unused wait_result_t wr)
+{
+	uint64_t flushed = 0, seq = 0, head = 0;
+	void *bounce = (void *)(su.dma + DMA_BOUNCE);
+	_Static_assert(FX_LOG_AREA_BLOCKS == 1 + 2 * (SWEET_LOG_SIZE / UFS_BLOCK), "log area layout");
+	for (;;) {
+		(void)tsleep(&sweet_log_chan, PZERO, "fuxilog", hz * (int)sweet_log_secs);
+		uint64_t total = os_atomic_load(&sweet_log_total, relaxed);
+		if (total == flushed) {
+			continue;
+		}
+		uint64_t pos = total - flushed >= SWEET_LOG_SIZE ? total - SWEET_LOG_SIZE : flushed;
+		lck_mtx_lock(&sweet_ufs_lock);
+		int error = su.poisoned ? EIO : fuxi_ufs_check_idle();
+		if (!error) {
+			error = fx_log_copy(1, pos, total);
+		}
+		/* Until the ring wraps the head is the same bytes; afterwards it keeps the boot. */
+		if (!error && total <= SWEET_LOG_SIZE) {
+			error = fx_log_copy(1 + SWEET_LOG_SIZE / UFS_BLOCK, flushed, total);
+			if (!error) {
+				head = total;
+			}
+		}
+		if (!error) {
+			struct fx_log_header h = {
+				.magic = { 'S', 'W', 'E', 'E', 'T', 'L', 'O', 'G' },
+				.version = 2, .size = SWEET_LOG_SIZE, .total = total, .seq = ++seq,
+				.head_bytes = head, .boot = fx_log_boot, .flush_secs = sweet_log_secs,
+			};
+			bzero(bounce, UFS_BLOCK);
+			memcpy(bounce, &h, sizeof(h));
+			memcpy((char *)bounce + 2048, fx_log_stamp, sizeof(fx_log_stamp));
+			error = fx_log_put(0, 1);
+		}
+		if (!error) {
+			uint8_t saved = su.lun;
+			su.lun = fx_log_lun;
+			error = ufs_sync_cache();
+			su.lun = saved;
+		}
+		lck_mtx_unlock(&sweet_ufs_lock);
+		if (error) {
+			fx_log_ok = false;
+			printf("FUXI LOG: write failed (%d), stopping\n", error);
+			return;
+		}
+		flushed = total;
+	}
+}
+
+static void
+fx_log_start(void)
+{
+	static const uint8_t luns[] = {0, 4, 5, 1, 2, 3};
+	const uint8_t *b = (const uint8_t *)(su.dma + DMA_BOUNCE);
+	uint32_t on = 0, lun = 0;
+	uint64_t first = 0, blocks = 0;
+	int found = 0, stamped = 0, error = 0;
+	DTEntry chosen;
+	const void *prop;
+	unsigned int bytes;
+	thread_t thread;
+
+	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
+	    SecureDTGetProperty(chosen, "fuxi,log", &prop, &bytes) == kSuccess && bytes == sizeof(uint32_t)) {
+		memcpy(&on, prop, sizeof(on));
+	}
+	(void)PE_parse_boot_argn("fuxilog", &on, sizeof(on));
+	if (on != 1 || !su.ready || su.unixnu || fx_log_ok) {
+		return;
+	}
+	PE_parse_boot_argn("ufslogsecs", &sweet_log_secs, sizeof(sweet_log_secs));
+	if (sweet_log_secs == 0 || sweet_log_secs > 60) {
+		sweet_log_secs = SWEET_LOG_SECS;
+	}
+	lck_mtx_lock(&sweet_ufs_lock);
+	uint8_t saved = su.lun;
+	for (unsigned i = 0; i < sizeof(luns) && !found && !su.poisoned; i++) {
+		if (fuxi_ufs_check_idle()) {
+			break;
+		}
+		su.lun = luns[i];
+		if (!fx_gpt_lookup(FX_LOG_PART, &first, &blocks)) {
+			lun = luns[i];
+			found = 1;
+		}
+		su.lun = saved;
+	}
+	if (found && blocks >= FX_LOG_AREA_BLOCKS) {
+		su.lun = (uint8_t)lun;
+		error = ufs_read_blocks(first, 1);
+		su.lun = saved;
+		if (!error && memcmp(b + 2048, fx_log_stamp, sizeof(fx_log_stamp)) == 0) {
+			stamped = 1;
+			if (memcmp(b, "SWEETLOG", 8) == 0) {
+				memcpy(&fx_log_boot, b + __builtin_offsetof(struct fx_log_header, boot), sizeof(fx_log_boot));
+				fx_log_boot++;
+			}
+		}
+	}
+	su.lun = saved;
+	lck_mtx_unlock(&sweet_ufs_lock);
+	if (!found || blocks < FX_LOG_AREA_BLOCKS || error || !stamped) {
+		printf("FUXI LOG: off (" FX_LOG_PART " %s%s, error %d)\n", found ? "found" : "not found",
+		    found && blocks < FX_LOG_AREA_BLOCKS ? " but too small" : found && !stamped ? " but not stamped" : "", error);
+		return;
+	}
+	fx_log_lun = (uint8_t)lun;
+	fx_log_first = first;
+	fx_log_ok = true;
+	if (kernel_thread_start(fx_log_thread, NULL, &thread) == KERN_SUCCESS) {
+		thread_deallocate(thread);
+		printf("FUXI LOG: console to " FX_LOG_PART " (LUN %u, block 0x%llx, %u KiB), boot #%u, every %u s\n", lun, first,
+		    FX_LOG_AREA_BLOCKS * UFS_BLOCK >> 10, fx_log_boot, sweet_log_secs);
+	} else {
+		fx_log_ok = false;
+	}
+}
+#endif
 
 /* Root device for rd=ufsroot0 (IOFindBSDRoot). */
 int sweet_ufs_rootdev(dev_t *dev);

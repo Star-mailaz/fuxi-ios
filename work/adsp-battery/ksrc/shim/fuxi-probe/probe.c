@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include "../font.h"
 #include "monitor.h"
+#include "gpu-handoff.h"
 #define printf(...) ((void)0)
 #define rsr(r) ({ uint64_t v; __asm__ volatile("mrs %0, " r : "=r"(v)); v; })
 static void *memset(void *dst, int c, size_t n)
@@ -1163,12 +1164,13 @@ ud_setup(void)
             monitor_report[MON_DELEGATE]=1;
         monitor_report[MON_USB_MPIDR]=rsr("mpidr_el1");
         memcpy(data, (const void *)monitor_report, sizeof(monitor_report)); n=sizeof(monitor_report);
-    } else if (type == 0xc0 && (req == 0x47 || req == 0x58)) {
+    } else if (type == 0xc0 && (req == 0x47 || req == 0x58 || req == 0x59)) {
         uint32_t index=(uint32_t)st[4] | ((uint32_t)st[5]<<8);
         uint64_t off=(uint64_t)value | ((uint64_t)index<<16);
         if (req == 0x58) off += 0x100000000ULL; /* upper 4 GiB bank */
+        if (req == 0x59) off += 0x200000000ULL;
         n=length > 512 ? 512 : length;
-        if (off > 0x13e000000ULL || n > 0x13e000000ULL-off) ok=false;
+        if (off > FG_RAM_SIZE || n > FG_RAM_SIZE-off) ok=false;
         else memcpy(data, (const void *)(uintptr_t)(0x8c0000000ULL+off), n);
     } else if (type == 0xc0 && req == 0x4e) {
         uint32_t index=(uint32_t)st[4] | ((uint32_t)st[5]<<8);

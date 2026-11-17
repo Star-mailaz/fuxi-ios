@@ -44,6 +44,16 @@ static bool enabled_present, bw_present;
 static int enabled_arg, bw_arg;
 static char logs[32768];
 static size_t loglen;
+static unsigned rpmh_locked, rpmh_failed, rpmh_acquires, rpmh_releases;
+static int fuxi_rpmh_acquire(void) {
+    assert(!rpmh_locked);
+    if(rpmh_failed) return -1;
+    rpmh_locked=1; rpmh_acquires++; return 0;
+}
+static void fuxi_rpmh_release(int healthy) {
+    assert(rpmh_locked); rpmh_locked=0; rpmh_releases++;
+    if(!healthy) rpmh_failed=1;
+}
 static void test_printf(const char *fmt, ...) {
     va_list ap; va_start(ap,fmt);
     int n=vsnprintf(logs+loglen,sizeof(logs)-loglen,fmt,ap);
@@ -60,8 +70,9 @@ static uint32_t usb_rd(uintptr_t base, uint32_t off) {
         assert(!(off&3) && off<=WL_CMDDB_BYTES-4);
         return db[off] | (uint32_t)db[off+1]<<8 | (uint32_t)db[off+2]<<16 | (uint32_t)db[off+3]<<24;
     }
-    if(base==RH_DRV_PA) { assert(off==0 || off==12); return off ? cfg : revision; }
+    if(base==RH_DRV_PA) { assert(rpmh_locked && (off==0 || off==12)); return off ? cfg : revision; }
     if(base==RH_TCS_PA) {
+        assert(rpmh_locked);
         assert(!(off&3) && off/4<1024);
         if(off>=0x40 && off<=0x40+15*24 && (off-0x40)%24==0) status_reads++;
         return rsc[off/4];
@@ -70,6 +81,7 @@ static uint32_t usb_rd(uintptr_t base, uint32_t off) {
     assert(base==WL_GCC); return 0;
 }
 static void ts_wr(uintptr_t base, uint32_t off, uint32_t v) {
+    assert(rpmh_locked);
     assert(base==RH_TCS_PA && off/4<1024 && !(off&3));
     if(fw_faults) return;
     if(base+off==fault_write) { fw_faults++; return; }
@@ -113,12 +125,15 @@ static unsigned wl_pdc_acks, pdc_error;
 static unsigned wl_seq_flags;
 static bool wl_variant_invalid, wl_seq_requested;
 static bool wl_rails_requested;
+static bool wl18_cap_invalid;
 static int wl_rails_on(unsigned variant, const char *where) { return 0; }
 static int wl_cnss_pdc(void) { return pdc_error; } /* peer exercised by M6n suite */
 static void wl5_status(unsigned s) { }
 static bool wl_smmu_fault(unsigned s) { return false; }
 static void fw_m3_summary(unsigned s) { }
 static void wl5_abort(unsigned s) { aborts++; }
+static bool wl_ath_enabled;
+static int wl_ath_run(void) { return 0; }
 static void wl_finish(unsigned limit) { if(limit>=17) wl5_abort(limit); }
 static void fw_dump(const char *tag, const uint32_t *r, unsigned n) { }
 '''
@@ -130,6 +145,8 @@ static void put16(unsigned at, uint16_t v) {
 }
 static void put32(unsigned at, uint32_t v) { put16(at,v); put16(at+2,v>>16); }
 static void fixture(void) {
+    assert(!rpmh_locked);
+    rpmh_failed=rpmh_acquires=rpmh_releases=0;
     memset(db,0,sizeof(db)); memset(rsc,0,sizeof(rsc));
     memset(wl3_report,0,sizeof(wl3_report)); memset(wl5_report,0,sizeof(wl5_report));
     fw_faults=wl3_faults=writes=triggers=delays=nstages=bhi=aborts=nsent=0;
@@ -141,6 +158,7 @@ static void fixture(void) {
     enabled_present=bw_present=false; enabled_arg=bw_arg=0;
     wl_icc_enabled=1; wl_icc_bw=0; wl_icc_configured=wl_icc_ready=wl_icc_failed=false;
     wl_icc_acks=0; rh_poisoned=false; wl_icc_test_expect_votes=true;
+    wl18_cap_invalid=false;
     loglen=0; logs[0]=0;
     put32(0,1); put32(4,0x0c0330db);
     put16(8,5); put16(10,0); put16(12,512); put16(14,6); put16(16,0x100);
@@ -327,6 +345,11 @@ int main(void) {
     }
     /* Actual fw_run hooks: initial vote before step2 and all clocks, link
        update before endpoint setup; either failure prevents the BHI step. */
+    fixture(); assert(!wl18_cap_invalid); wl18_cap_invalid=true; fw_run(22);
+    assert(!writes && !triggers && !delays && !bhi && !nstages && !aborts && !nsent);
+    assert(!rpmh_locked && !rpmh_acquires && !rpmh_releases);
+    assert(!wl3_report[0] && !wl4_report[0] && !wl5_report[0]);
+    assert(strstr(logs,"invalid fuxiwlancap (expected exact 0, 1 or 2); refused before WLAN power writes"));
     fixture(); pdc_error=6; fw_run(22);
     assert(!triggers && !bhi && !nstages); /* policy failure precedes all power writes */
     pdc_error=0;
@@ -342,7 +365,13 @@ int main(void) {
     }
     fixture(); enabled_present=true; enabled_arg=0; wl_icc_test_expect_votes=false;
     fw_run(22); assert(bhi==1 && !triggers && !wl_icc_acks);
-    puts("M6i/M6j production cmd-db/encoding/VCD/TCS/ordering/failure tests passed");
+    fixture(); rpmh_failed=1;
+    assert(rh_send(0,0x40000,1000)==1 && !writes && !triggers && !rpmh_locked);
+    fixture(); cmd_status=0x100;
+    assert(rh_send(0,0x40000,1000)==2 && rpmh_failed && rpmh_acquires==rpmh_releases);
+    unsigned before_poison=writes;
+    assert(rh_send(1,0x40000,1000)==1 && writes==before_poison && !rpmh_locked);
+    puts("M6i/M6j production cmd-db/encoding/VCD/TCS/ordering/failure/shared-lock tests passed");
     return 0;
 }
 '''
@@ -357,8 +386,9 @@ def main():
                           if line.startswith(('static uint8_t wl_cdb8(', 'static uint32_t wl_cdb16(')))
     icc = driver.split('/* ---- milestone 6i:', 1)[1].split('/* ---- end milestone 6i ---- */', 1)[0]
     icc = '/* ---- milestone 6i:' + icc
+    cap_guard = 'static bool\nwl18_cap_refused(' + driver.split('static bool\nwl18_cap_refused(', 1)[1].split('#define WL_CNSS_IOVA', 1)[0]
     runner = 'static void wl17_clk_step(void) {} /* P17 SPMI sleep clock: kernel only */\nstatic void\nfw_run(' + driver.split('static void\nfw_run(', 1)[1].split('static void\nfw_thread(', 1)[0]
-    source = PREAMBLE + transport + accessors + icc + runner + TESTS
+    source = PREAMBLE + transport + accessors + icc + cap_guard + runner + TESTS
     source = re.sub(r'__asm__ volatile\([^;]+;', '/* host barrier */;', source)
     with tempfile.TemporaryDirectory(prefix='fuxi-wlan-m6i-') as tmp:
         cfile, binary = Path(tmp) / 'm6i.c', Path(tmp) / 'm6i'

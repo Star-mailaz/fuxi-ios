@@ -1794,6 +1794,257 @@ uncertain:
  printf("FUXI SCANOUT: panel120 aborted; panel state uncertain, reboot required\n");
  return fg_scanout_stop("panel120 switch incomplete");
 }
+/* fuxibacklight=4: panel brightness. One DCS set_display_brightness (0x51, 11-bit level, high byte first; 0x7ff is the panel's
+ * normal maximum, mi,mdss-dsi-fac-bl-max-level) through the command-DMA FIFO sequence of fg_panel120_switch, with a single long
+ * packet. Only the display owner sends it, under FG_GUARD, between transfers: autorefresh off, CTL START clear, the write line idle
+ * and the DSI controller idle. Every START is written under FG_GUARD (fg_scanout_publish), so no transfer can begin while the
+ * command is on the link. A waiting level goes out right before the next START (animated screens) or from a short thread call
+ * (static screens); a newer level replaces one not sent yet. The AppleARMBacklight service (FuxiDsiBacklight.cpp) only stores the
+ * level here and never touches the hardware. Needs fuxigpuscanout=1 (ownership) and fuxipanel120=1 (only then is the DSI0 window
+ * mapped). After an uncertain command (error raised, or no completion) the registers are restored as after a good one, the DSI
+ * error status is read, logged and cleared the way Linux's dsi_error() does, and the level stays pending for the next window; only
+ * FG_BL_UNCERTAIN_MAX uncertain commands in a row halt brightness for this boot (2026-11-16 daily use: one uncertain command used
+ * to halt it at once, so the slider worked twice and then stopped). A latched error bit found before a send is cleared the same
+ * way instead of deferring every later level. If the controller is not idle after an uncertain command, scanout stops (panel
+ * held) as after a failed panel120. */
+#define FG_BL_PENDING 0x80000000u
+#define FG_BL_MAX 2047u
+#define FG_BL_IDLE_US 50u      /* MDP engine finishing the last lines after the write line went idle */
+#define FG_BL_DONE_US 2000u    /* a 3-byte HS long write completes in microseconds; the controller is idle right after */
+/* DMA-done wait. bl6t (2026-11-16): about 1 command in 250 had no done bit after 2 ms, yet INTR_CTRL showed it set right after
+ * the restore, with no error: the command waited behind an MDP frame whose TE-gated transfer began after the idle check. One 60 Hz
+ * frame is 16.7 ms, so wait longer than that before calling the command uncertain (the uncertain path waited for the controller
+ * anyway, but reset the FIFO under the still-queued command first). */
+#define FG_BL_DMA_US 20000u
+#define FG_BL_RETRY_US 4000u   /* static screen: retry while a transfer still runs */
+#define FG_BL_TRIES 12u        /* ~48 ms, longer than one 60 Hz transfer; later the next START sends it */
+#define FG_BL_UNCERTAIN_MAX 6u /* uncertain commands in a row before brightness halts for this boot */
+enum { FG_BL_D_OWNER, FG_BL_D_PANEL120, FG_BL_D_AR, FG_BL_D_XFER, FG_BL_D_DSI, FG_BL_D_GAVE_UP, FG_BL_D_N };
+static unsigned fg_bl_want, fg_bl_tries, fg_bl_halted, fg_bl_call_setup, fg_bl_sent, fg_bl_said, fg_bl_defer[FG_BL_D_N];
+static unsigned fg_bl_uncertain_run, fg_bl_uncertain, fg_bl_errclears;
+static uint64_t fg_bl_ticks_max;
+static thread_call_data_t fg_bl_call;
+/* The two FIFO words of one DCS long write: header (flags 0xc0 = long packet + last of the batch, data type 0x39, 3 bytes), then
+ * the payload bytes 0x51, level high byte, level low byte and one pad byte 0xff (the FIFO takes word pairs). */
+static void fg_bl_words(unsigned level, uint32_t words[2])
+{
+ words[0] = 3u | (0x39u << 16) | (0xc0u << 24);
+ words[1] = 0x51u | (((level >> 8) & 0xffu) << 8) | ((level & 0xffu) << 16) | (0xffu << 24);
+}
+/* Bounded poll of a DSI register: 1 (status & mask) == want, 0 timeout, -1 MMIO failure. any=1: done when (status & mask) != 0.
+ * The last read is always taken after the deadline, so an interrupt between a read and the deadline check cannot turn a done
+ * transfer into a timeout. */
+static int fg_bl_poll(unsigned offset, unsigned mask, unsigned want, unsigned any, unsigned limit_us, unsigned *status)
+{
+ uint64_t deadline = rsr("cntpct_el0") + rsr("cntfrq_el0")*limit_us/1000000;
+ for (unsigned n = 0; n <= limit_us; n++) {
+  unsigned last = rsr("cntpct_el0") >= deadline;
+  if (!fg_scanout_read(FG_SCAN_DSI+offset, status)) return -1;
+  if (any ? (*status & mask) != 0 : (*status & mask) == want) return 1;
+  if (last) break;
+  delay(1);
+ }
+ return 0;
+}
+static unsigned fg_bl_late;
+/* 1 sent, 0 not sent (a stale DMA-done that would not clear; registers restored), 2 uncertain (triggered without a clean
+ * completion; registers restored), -1 MMIO failure. trigger/dma/irq/length are the values read before. */
+static int fg_bl_send(unsigned level, unsigned trigger, unsigned dma, unsigned irq, unsigned length)
+{
+ uint32_t words[2];
+ unsigned masks = irq & 0xaaaaaaaau, status = 0, triggered = 0;
+ int result = 0;
+ fg_bl_words(level, words);
+ /* Software DMA trigger 4, MDP/TE trigger fields kept; DMA_TRG_MUX bit16 and BLOCK_DMA_WITHIN_FRAME bit12 cleared while idle. */
+ if (!fg_scanout_write(FG_SCAN_DSI+0x084, (trigger & ~0x1100fu) | 4) ||
+     !fg_scanout_write(FG_SCAN_DSI+0x110, (masks & ~2u) | 1u)) return -1;
+ int cleared = fg_bl_poll(0x110, 1, 0, 0, FG_BL_IDLE_US, &status); /* the stale DMA-done must read clear before the trigger */
+ if (cleared < 0) return -1;
+ if (cleared) {
+  if (!fg_scanout_write(FG_SCAN_DSI+0x1ec, 1)) return -1;
+  __asm__ volatile("dsb sy" ::: "memory");
+  delay(1);
+  if (!fg_scanout_write(FG_SCAN_DSI+0x1ec, 0) ||
+      !fg_scanout_write(FG_SCAN_DSI+0x15c, 0x00030006) ||
+      !fg_scanout_write(FG_SCAN_DSI+0x17c, words[0]) ||
+      !fg_scanout_write(FG_SCAN_DSI+0x17c, words[1]) ||
+      /* Embedded register FIFO, unicast HS: broadcast/master/LP all clear. */
+      !fg_scanout_write(FG_SCAN_DSI+0x03c, (dma & ~0xc4000000u) | 0x10000000u) ||
+      !fg_scanout_write(FG_SCAN_DSI+0x04c, 8)) return -1;
+  __asm__ volatile("dsb sy" ::: "memory");
+  if (!fg_scanout_write(FG_SCAN_DSI+0x090, 1)) return -1;
+  triggered = 1;
+  uint64_t t0 = rsr("cntpct_el0");
+  int done = fg_bl_poll(0x110, 1u | (1u << 24), 0, 1, FG_BL_DMA_US, &status);
+  if (done < 0) return -1;
+  uint64_t us = (rsr("cntpct_el0") - t0)*1000000/rsr("cntfrq_el0");
+  if (done && us > FG_BL_DONE_US && fg_bl_late++ < 8)
+   printf("FUXI BACKLIGHT DSI: level=%u DMA done after %llu us (late #%u) irq=%#x\n", level, (unsigned long long)us, fg_bl_late, status);
+  result = done && !(status & (1u << 24)) ? 1 : 2;
+  if (result == 1) {
+   int idle = fg_bl_poll(0x008, 0x1f, 0, 0, FG_BL_DONE_US, &status);
+   if (idle < 0) return -1;
+   if (!idle) result = 2;
+  }
+ }
+ /* Same restore as a completed panel120 switch: done status cleared, TPG off, FIFO reset, ABL's command settings back. */
+ if (!fg_scanout_write(FG_SCAN_DSI+0x110, (masks & ~2u) | 1u) ||
+     !fg_scanout_write(FG_SCAN_DSI+0x15c, 0) ||
+     !fg_scanout_write(FG_SCAN_DSI+0x1ec, 1)) return -1;
+ __asm__ volatile("dsb sy" ::: "memory");
+ delay(1);
+ if (!fg_scanout_write(FG_SCAN_DSI+0x1ec, 0) ||
+     !fg_scanout_write(FG_SCAN_DSI+0x03c, dma) ||
+     !fg_scanout_write(FG_SCAN_DSI+0x04c, length) ||
+     !fg_scanout_write(FG_SCAN_DSI+0x084, trigger) ||
+     !fg_scanout_write(FG_SCAN_DSI+0x110, masks)) return -1;
+ __asm__ volatile("dsb sy" ::: "memory");
+ return triggered ? result : 0;
+}
+/* Under FG_GUARD, controller idle. Read the DSI error sources and clear them as Linux's dsi_error() does (dsi_host.c: ACK error
+ * status written back then 0, timeout / FIFO status written back, DLN0 PHY errors ESC|SYNC_ESC|CONTROL|CONTENTION_LP0|LP1,
+ * STATUS0 interleave contention bit 31, CLK_STATUS PLL unlocked bit 16), then the latched ERROR status bit 24 of INTR_CTRL (write
+ * one to clear; the mask bits are written back unchanged). Offsets are the 6G ones (dsi.xml.h + 4, as every offset here).
+ * 1: the error bit reads clear afterwards, 0: still set, -1: MMIO failure. */
+static int fg_bl_errclear(const char *why, unsigned level)
+{
+ unsigned st0, fifo, ack, dln0, tmo, clk, irq, after;
+ if (!fg_scanout_read(FG_SCAN_DSI+0x008, &st0) || !fg_scanout_read(FG_SCAN_DSI+0x00c, &fifo) ||
+     !fg_scanout_read(FG_SCAN_DSI+0x068, &ack) || !fg_scanout_read(FG_SCAN_DSI+0x0b4, &dln0) ||
+     !fg_scanout_read(FG_SCAN_DSI+0x0c0, &tmo) || !fg_scanout_read(FG_SCAN_DSI+0x120, &clk) ||
+     !fg_scanout_read(FG_SCAN_DSI+0x110, &irq)) return -1;
+ if (ack && (!fg_scanout_write(FG_SCAN_DSI+0x068, ack) || !fg_scanout_write(FG_SCAN_DSI+0x068, 0))) return -1;
+ if (tmo && !fg_scanout_write(FG_SCAN_DSI+0x0c0, tmo)) return -1;
+ if (fifo && !fg_scanout_write(FG_SCAN_DSI+0x00c, fifo)) return -1;
+ if ((dln0 & 0x11111u) && !fg_scanout_write(FG_SCAN_DSI+0x0b4, dln0)) return -1;
+ if ((st0 & 0x80000000u) && !fg_scanout_write(FG_SCAN_DSI+0x008, st0)) return -1;
+ if ((clk & 0x10000u) && !fg_scanout_write(FG_SCAN_DSI+0x120, clk)) return -1;
+ __asm__ volatile("dsb sy" ::: "memory");
+ if (!fg_scanout_write(FG_SCAN_DSI+0x110, (irq & 0xaaaaaaaau) | (1u << 24))) return -1;
+ __asm__ volatile("dsb sy" ::: "memory");
+ if (!fg_scanout_read(FG_SCAN_DSI+0x110, &after)) return -1;
+ if (fg_bl_errclears++ < 12)
+  printf("FUXI BACKLIGHT DSI: %s level=%u errors status0=%#x fifo=%#x ack=%#x dln0=%#x timeout=%#x clk=%#x irq=%#x -> %#x (#%u)\n",
+      why, level, st0, fifo, ack, dln0, tmo, clk, irq, after, fg_bl_errclears);
+ return (after & (1u << 24)) ? 0 : 1;
+}
+/* Under FG_GUARD. 1: nothing waiting, or sent; 0: deferred (the level keeps waiting); -1: scanout stopped. via: 0 START, 1 timer. */
+static int fg_bl_flush(unsigned via)
+{
+ unsigned want = __atomic_load_n(&fg_bl_want, __ATOMIC_ACQUIRE);
+ if (!(want & FG_BL_PENDING)) return 1;
+ if (fg_bl_halted) {
+  (void)__atomic_compare_exchange_n(&fg_bl_want, &want, want & ~FG_BL_PENDING, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+  return 1;
+ }
+ if (!fg_scanout_requested || !fg_scanout_panel120_requested || fg_scanout_failed || !fuxi_gpu_scanout_owned()) {
+  fg_bl_defer[FG_BL_D_OWNER]++;
+  if (!fg_scanout_requested || !fg_scanout_panel120_requested) {
+   if (!(fg_bl_said & 1)) { fg_bl_said |= 1; printf("FUXI BACKLIGHT DSI: not sent: needs fuxigpuscanout=1 fuxipanel120=1\n"); }
+  }
+  return 0;
+ }
+ if (!fg_scanout_panel120_attempted) { fg_bl_defer[FG_BL_D_PANEL120]++; return 0; }
+ if (fg_scanout_ar_on() || fg_scanout_ar_state == 4 || fg_scanout_mid_dirty) {
+  fg_bl_defer[FG_BL_D_AR]++;
+  if (!(fg_bl_said & 2)) { fg_bl_said |= 2; printf("FUXI BACKLIGHT DSI: deferred: autorefresh or mid-period START owns the trigger\n"); }
+  return 0;
+ }
+ unsigned ar, start, line;
+ if (!fg_scanout_read(FG_SCAN_INTF+0x2b4, &ar) || !fg_scanout_read(FG_SCAN_CTL+0x1c, &start) ||
+     !fg_scanout_read(FG_SCAN_INTF+0x2b0, &line)) return fg_scanout_stop("backlight transfer status");
+ if ((ar & 0x80000000u) || (start & 1) || ((line & 65535) != 0 && (line & 65535) < 2400)) { fg_bl_defer[FG_BL_D_XFER]++; return 0; }
+ unsigned status, ctrl, dma, trigger, irq, tpg, length;
+ int idle = fg_bl_poll(0x008, 0x1f, 0, 0, FG_BL_IDLE_US, &status);
+ if (idle < 0 || !fg_scanout_read(FG_SCAN_DSI+0x004, &ctrl) || !fg_scanout_read(FG_SCAN_DSI+0x03c, &dma) ||
+     !fg_scanout_read(FG_SCAN_DSI+0x084, &trigger) || !fg_scanout_read(FG_SCAN_DSI+0x110, &irq) ||
+     !fg_scanout_read(FG_SCAN_DSI+0x15c, &tpg) || !fg_scanout_read(FG_SCAN_DSI+0x04c, &length))
+  return fg_scanout_stop("backlight setup MMIO");
+ /* A latched error (from the link or an earlier uncertain command): clear it once here rather than deferring every later level. */
+ if (idle && (ctrl & 7) == 5 && !tpg && (irq & (1u << 24))) {
+  int c = fg_bl_errclear("latched error before send", want & FG_BL_MAX);
+  if (c < 0) return fg_scanout_stop("backlight error clear MMIO");
+  if (!fg_scanout_read(FG_SCAN_DSI+0x110, &irq)) return fg_scanout_stop("backlight setup MMIO");
+ }
+ /* The inherited command engine, an idle TPG and no pending error, as fg_panel120_switch requires. */
+ if (!idle || (ctrl & 7) != 5 || tpg || (irq & (1u << 24))) {
+  if (fg_bl_defer[FG_BL_D_DSI]++ < 4)
+   printf("FUXI BACKLIGHT DSI: deferred status=%#x ctrl=%#x tpg=%#x irq=%#x\n", status, ctrl, tpg, irq);
+  return 0;
+ }
+ uint64_t t0 = rsr("cntpct_el0");
+ unsigned level = want & FG_BL_MAX;
+ int r = fg_bl_send(level, trigger, dma, irq, length);
+ uint64_t ticks = rsr("cntpct_el0") - t0;
+ if (r < 0) {
+  printf("FUXI BACKLIGHT DSI: MMIO failure level=%u; panel state uncertain\n", level);
+  return fg_scanout_stop("backlight command MMIO");
+ }
+ if (!r) { fg_bl_defer[FG_BL_D_DSI]++; return 0; }
+ if (r == 2) {
+  unsigned after = 0;
+  int quiet = fg_bl_poll(0x008, 0x1f, 0, 0, FG_SCAN_DSI_TIMEOUT_US, &after);
+  fg_bl_uncertain++;
+  if (quiet != 1) {
+   printf("FUXI BACKLIGHT DSI: level=%u no clean completion and the controller stays busy (status=%#x)\n", level, after);
+   return fg_scanout_stop("backlight command incomplete");
+  }
+  int c = fg_bl_errclear("no clean completion", level);
+  if (c < 0) return fg_scanout_stop("backlight error clear MMIO");
+  if (++fg_bl_uncertain_run >= FG_BL_UNCERTAIN_MAX) {
+   fg_bl_halted = 1;
+   (void)__atomic_compare_exchange_n(&fg_bl_want, &want, want & ~FG_BL_PENDING, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+   printf("FUXI BACKLIGHT DSI: level=%u %u uncertain commands in a row (%u in all, %u sent); brightness halted for this boot\n",
+       level, fg_bl_uncertain_run, fg_bl_uncertain, fg_bl_sent);
+   return 1;
+  }
+  /* The level stays pending: the next window (START or the retry timer) sends it again. */
+  return 0;
+ }
+ fg_bl_uncertain_run = 0;
+ /* Sent: clear the request unless a newer level arrived meanwhile (it stays pending for the next window). */
+ (void)__atomic_compare_exchange_n(&fg_bl_want, &want, want & ~FG_BL_PENDING, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+ if (ticks > fg_bl_ticks_max) fg_bl_ticks_max = ticks;
+ if (++fg_bl_sent <= 8 || !(fg_bl_sent & 63)) {
+  uint64_t hz = rsr("cntfrq_el0");
+  unsigned *d = fg_bl_defer;
+  printf("FUXI BACKLIGHT DSI: level=%u sent=%u via=%s us=%llu max_us=%llu deferred owner/panel120/ar/xfer/dsi/gave_up=%u/%u/%u/%u/%u/%u\n",
+      level, fg_bl_sent, via ? "timer" : "start", (unsigned long long)(ticks*1000000/hz),
+      (unsigned long long)(fg_bl_ticks_max*1000000/hz), d[0], d[1], d[2], d[3], d[4], d[5]);
+ }
+ return 1;
+}
+static void fg_bl_run(thread_call_param_t a, thread_call_param_t b)
+{
+ (void)a; (void)b;
+ unsigned again = 0;
+ {
+  FG_GUARD;
+  if (fg_bl_flush(1) == 0) {
+   if (++fg_bl_tries < FG_BL_TRIES) again = 1;
+   else fg_bl_defer[FG_BL_D_GAVE_UP]++;
+  }
+ }
+ if (again) {
+  uint64_t d;
+  nanoseconds_to_absolutetime(FG_BL_RETRY_US*1000ull, &d);
+  (void)thread_call_enter_delayed(&fg_bl_call, mach_absolute_time() + d);
+ }
+}
+/* Any thread, no locks held: store the newest level and try to send it soon. */
+void fuxi_gpu_scanout_backlight(unsigned level);
+void fuxi_gpu_scanout_backlight(unsigned level)
+{
+ unsigned expect = 0;
+ if (level > FG_BL_MAX) level = FG_BL_MAX;
+ __atomic_store_n(&fg_bl_want, FG_BL_PENDING | level, __ATOMIC_RELEASE);
+ __atomic_store_n(&fg_bl_tries, 0u, __ATOMIC_RELAXED);
+ if (__atomic_compare_exchange_n(&fg_bl_call_setup, &expect, 1u, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+  thread_call_setup_with_options(&fg_bl_call, fg_bl_run, NULL, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
+  __atomic_store_n(&fg_bl_call_setup, 2u, __ATOMIC_RELEASE);
+ }
+ if (__atomic_load_n(&fg_bl_call_setup, __ATOMIC_ACQUIRE) == 2u) (void)thread_call_enter(&fg_bl_call);
+}
 /* 1 writable, 0 wait, -1 held after error. Normal gates do not spin or sleep;
  * the one-time panel120 switch uses bounded polling before granting writes.
  * First
@@ -2055,6 +2306,7 @@ static int fg_scanout_publish(void)
      !fg_scanout_read(FG_SCAN_CTL+0x1c, &start) || (start & 1)))
   return fg_scanout_stop("publish transfer status");
  if (fg_abi_mid && !arm_on && !fg_scanout_mid_allow()) return 2; /* outside the tear-safe part of the period: the caller retries */
+ if (!arm_on && fg_bl_flush(0) < 0) return -1; /* fuxibacklight=4: a waiting brightness level goes out before this START */
  fg_scanout_charge_to(fg_scanout_last_why); /* the last wait ran until this poll */
  __asm__ volatile("dsb sy" ::: "memory");
  if (!ov) fg_scanout_writable = 0;

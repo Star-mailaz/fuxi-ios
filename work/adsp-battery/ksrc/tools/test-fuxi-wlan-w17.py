@@ -160,7 +160,7 @@ def integration():
     /* P17 selector validity: legacy low bits, P17 bits, and pre-W12 handling. */
     {
         const struct {int v, bad;} t[]={{0,0},{1,0},{2,0},{3,1},{4,0},{5,0},{8,0},{9,0},{0xa,1},{0x10,1},{0x11,0},
-            {0x12,1},{0x1fd,0},{0x1fc,1},{0x1ff,1},{0x200,1},{0x201,1},{-1,1},{0x100,0},{0x40,0},{0x80,0},{0x20,0}};
+            {0x12,1},{0x1fd,0},{0x1fc,1},{0x1ff,1},{0x200,0},{0x201,0},{0x2c0,0},{0x3fd,0},{0x3fc,1},{0x3ff,1},{0x400,1},{0x401,1},{-1,1},{0x100,0},{0x40,0},{0x80,0},{0x20,0}};
         for(unsigned i=0;i<sizeof(t)/sizeof(t[0]);i++) {
             qrtr_arg=2;mlo_present=true;mlo_arg=t[i].v;wl_probe_configure();
             assert(wl_variant_invalid==(bool)t[i].bad);

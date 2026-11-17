@@ -1628,7 +1628,7 @@
 +#endif
 --- a/bsd/dev/fuxi_gpu_scanout.inc
 +++ b/bsd/dev/fuxi_gpu_scanout.inc
-@@ -0,0 +1,2386 @@
+@@ -0,0 +1,2638 @@
 +/* SPDX-License-Identifier: MIT
 + * Copyright (c) 2026 NativeMetal contributors
 + * Ported from UniXNU drivers/NativeMetal/GpuScanoutClient.h (MIT).
@@ -3425,6 +3425,257 @@
 + printf("FUXI SCANOUT: panel120 aborted; panel state uncertain, reboot required\n");
 + return fg_scanout_stop("panel120 switch incomplete");
 +}
++/* fuxibacklight=4: panel brightness. One DCS set_display_brightness (0x51, 11-bit level, high byte first; 0x7ff is the panel's
++ * normal maximum, mi,mdss-dsi-fac-bl-max-level) through the command-DMA FIFO sequence of fg_panel120_switch, with a single long
++ * packet. Only the display owner sends it, under FG_GUARD, between transfers: autorefresh off, CTL START clear, the write line idle
++ * and the DSI controller idle. Every START is written under FG_GUARD (fg_scanout_publish), so no transfer can begin while the
++ * command is on the link. A waiting level goes out right before the next START (animated screens) or from a short thread call
++ * (static screens); a newer level replaces one not sent yet. The AppleARMBacklight service (FuxiDsiBacklight.cpp) only stores the
++ * level here and never touches the hardware. Needs fuxigpuscanout=1 (ownership) and fuxipanel120=1 (only then is the DSI0 window
++ * mapped). After an uncertain command (error raised, or no completion) the registers are restored as after a good one, the DSI
++ * error status is read, logged and cleared the way Linux's dsi_error() does, and the level stays pending for the next window; only
++ * FG_BL_UNCERTAIN_MAX uncertain commands in a row halt brightness for this boot (2026-11-16 daily use: one uncertain command used
++ * to halt it at once, so the slider worked twice and then stopped). A latched error bit found before a send is cleared the same
++ * way instead of deferring every later level. If the controller is not idle after an uncertain command, scanout stops (panel
++ * held) as after a failed panel120. */
++#define FG_BL_PENDING 0x80000000u
++#define FG_BL_MAX 2047u
++#define FG_BL_IDLE_US 50u      /* MDP engine finishing the last lines after the write line went idle */
++#define FG_BL_DONE_US 2000u    /* a 3-byte HS long write completes in microseconds; the controller is idle right after */
++/* DMA-done wait. bl6t (2026-11-16): about 1 command in 250 had no done bit after 2 ms, yet INTR_CTRL showed it set right after
++ * the restore, with no error: the command waited behind an MDP frame whose TE-gated transfer began after the idle check. One 60 Hz
++ * frame is 16.7 ms, so wait longer than that before calling the command uncertain (the uncertain path waited for the controller
++ * anyway, but reset the FIFO under the still-queued command first). */
++#define FG_BL_DMA_US 20000u
++#define FG_BL_RETRY_US 4000u   /* static screen: retry while a transfer still runs */
++#define FG_BL_TRIES 12u        /* ~48 ms, longer than one 60 Hz transfer; later the next START sends it */
++#define FG_BL_UNCERTAIN_MAX 6u /* uncertain commands in a row before brightness halts for this boot */
++enum { FG_BL_D_OWNER, FG_BL_D_PANEL120, FG_BL_D_AR, FG_BL_D_XFER, FG_BL_D_DSI, FG_BL_D_GAVE_UP, FG_BL_D_N };
++static unsigned fg_bl_want, fg_bl_tries, fg_bl_halted, fg_bl_call_setup, fg_bl_sent, fg_bl_said, fg_bl_defer[FG_BL_D_N];
++static unsigned fg_bl_uncertain_run, fg_bl_uncertain, fg_bl_errclears;
++static uint64_t fg_bl_ticks_max;
++static thread_call_data_t fg_bl_call;
++/* The two FIFO words of one DCS long write: header (flags 0xc0 = long packet + last of the batch, data type 0x39, 3 bytes), then
++ * the payload bytes 0x51, level high byte, level low byte and one pad byte 0xff (the FIFO takes word pairs). */
++static void fg_bl_words(unsigned level, uint32_t words[2])
++{
++ words[0] = 3u | (0x39u << 16) | (0xc0u << 24);
++ words[1] = 0x51u | (((level >> 8) & 0xffu) << 8) | ((level & 0xffu) << 16) | (0xffu << 24);
++}
++/* Bounded poll of a DSI register: 1 (status & mask) == want, 0 timeout, -1 MMIO failure. any=1: done when (status & mask) != 0.
++ * The last read is always taken after the deadline, so an interrupt between a read and the deadline check cannot turn a done
++ * transfer into a timeout. */
++static int fg_bl_poll(unsigned offset, unsigned mask, unsigned want, unsigned any, unsigned limit_us, unsigned *status)
++{
++ uint64_t deadline = rsr("cntpct_el0") + rsr("cntfrq_el0")*limit_us/1000000;
++ for (unsigned n = 0; n <= limit_us; n++) {
++  unsigned last = rsr("cntpct_el0") >= deadline;
++  if (!fg_scanout_read(FG_SCAN_DSI+offset, status)) return -1;
++  if (any ? (*status & mask) != 0 : (*status & mask) == want) return 1;
++  if (last) break;
++  delay(1);
++ }
++ return 0;
++}
++static unsigned fg_bl_late;
++/* 1 sent, 0 not sent (a stale DMA-done that would not clear; registers restored), 2 uncertain (triggered without a clean
++ * completion; registers restored), -1 MMIO failure. trigger/dma/irq/length are the values read before. */
++static int fg_bl_send(unsigned level, unsigned trigger, unsigned dma, unsigned irq, unsigned length)
++{
++ uint32_t words[2];
++ unsigned masks = irq & 0xaaaaaaaau, status = 0, triggered = 0;
++ int result = 0;
++ fg_bl_words(level, words);
++ /* Software DMA trigger 4, MDP/TE trigger fields kept; DMA_TRG_MUX bit16 and BLOCK_DMA_WITHIN_FRAME bit12 cleared while idle. */
++ if (!fg_scanout_write(FG_SCAN_DSI+0x084, (trigger & ~0x1100fu) | 4) ||
++     !fg_scanout_write(FG_SCAN_DSI+0x110, (masks & ~2u) | 1u)) return -1;
++ int cleared = fg_bl_poll(0x110, 1, 0, 0, FG_BL_IDLE_US, &status); /* the stale DMA-done must read clear before the trigger */
++ if (cleared < 0) return -1;
++ if (cleared) {
++  if (!fg_scanout_write(FG_SCAN_DSI+0x1ec, 1)) return -1;
++  __asm__ volatile("dsb sy" ::: "memory");
++  delay(1);
++  if (!fg_scanout_write(FG_SCAN_DSI+0x1ec, 0) ||
++      !fg_scanout_write(FG_SCAN_DSI+0x15c, 0x00030006) ||
++      !fg_scanout_write(FG_SCAN_DSI+0x17c, words[0]) ||
++      !fg_scanout_write(FG_SCAN_DSI+0x17c, words[1]) ||
++      /* Embedded register FIFO, unicast HS: broadcast/master/LP all clear. */
++      !fg_scanout_write(FG_SCAN_DSI+0x03c, (dma & ~0xc4000000u) | 0x10000000u) ||
++      !fg_scanout_write(FG_SCAN_DSI+0x04c, 8)) return -1;
++  __asm__ volatile("dsb sy" ::: "memory");
++  if (!fg_scanout_write(FG_SCAN_DSI+0x090, 1)) return -1;
++  triggered = 1;
++  uint64_t t0 = rsr("cntpct_el0");
++  int done = fg_bl_poll(0x110, 1u | (1u << 24), 0, 1, FG_BL_DMA_US, &status);
++  if (done < 0) return -1;
++  uint64_t us = (rsr("cntpct_el0") - t0)*1000000/rsr("cntfrq_el0");
++  if (done && us > FG_BL_DONE_US && fg_bl_late++ < 8)
++   printf("FUXI BACKLIGHT DSI: level=%u DMA done after %llu us (late #%u) irq=%#x\n", level, (unsigned long long)us, fg_bl_late, status);
++  result = done && !(status & (1u << 24)) ? 1 : 2;
++  if (result == 1) {
++   int idle = fg_bl_poll(0x008, 0x1f, 0, 0, FG_BL_DONE_US, &status);
++   if (idle < 0) return -1;
++   if (!idle) result = 2;
++  }
++ }
++ /* Same restore as a completed panel120 switch: done status cleared, TPG off, FIFO reset, ABL's command settings back. */
++ if (!fg_scanout_write(FG_SCAN_DSI+0x110, (masks & ~2u) | 1u) ||
++     !fg_scanout_write(FG_SCAN_DSI+0x15c, 0) ||
++     !fg_scanout_write(FG_SCAN_DSI+0x1ec, 1)) return -1;
++ __asm__ volatile("dsb sy" ::: "memory");
++ delay(1);
++ if (!fg_scanout_write(FG_SCAN_DSI+0x1ec, 0) ||
++     !fg_scanout_write(FG_SCAN_DSI+0x03c, dma) ||
++     !fg_scanout_write(FG_SCAN_DSI+0x04c, length) ||
++     !fg_scanout_write(FG_SCAN_DSI+0x084, trigger) ||
++     !fg_scanout_write(FG_SCAN_DSI+0x110, masks)) return -1;
++ __asm__ volatile("dsb sy" ::: "memory");
++ return triggered ? result : 0;
++}
++/* Under FG_GUARD, controller idle. Read the DSI error sources and clear them as Linux's dsi_error() does (dsi_host.c: ACK error
++ * status written back then 0, timeout / FIFO status written back, DLN0 PHY errors ESC|SYNC_ESC|CONTROL|CONTENTION_LP0|LP1,
++ * STATUS0 interleave contention bit 31, CLK_STATUS PLL unlocked bit 16), then the latched ERROR status bit 24 of INTR_CTRL (write
++ * one to clear; the mask bits are written back unchanged). Offsets are the 6G ones (dsi.xml.h + 4, as every offset here).
++ * 1: the error bit reads clear afterwards, 0: still set, -1: MMIO failure. */
++static int fg_bl_errclear(const char *why, unsigned level)
++{
++ unsigned st0, fifo, ack, dln0, tmo, clk, irq, after;
++ if (!fg_scanout_read(FG_SCAN_DSI+0x008, &st0) || !fg_scanout_read(FG_SCAN_DSI+0x00c, &fifo) ||
++     !fg_scanout_read(FG_SCAN_DSI+0x068, &ack) || !fg_scanout_read(FG_SCAN_DSI+0x0b4, &dln0) ||
++     !fg_scanout_read(FG_SCAN_DSI+0x0c0, &tmo) || !fg_scanout_read(FG_SCAN_DSI+0x120, &clk) ||
++     !fg_scanout_read(FG_SCAN_DSI+0x110, &irq)) return -1;
++ if (ack && (!fg_scanout_write(FG_SCAN_DSI+0x068, ack) || !fg_scanout_write(FG_SCAN_DSI+0x068, 0))) return -1;
++ if (tmo && !fg_scanout_write(FG_SCAN_DSI+0x0c0, tmo)) return -1;
++ if (fifo && !fg_scanout_write(FG_SCAN_DSI+0x00c, fifo)) return -1;
++ if ((dln0 & 0x11111u) && !fg_scanout_write(FG_SCAN_DSI+0x0b4, dln0)) return -1;
++ if ((st0 & 0x80000000u) && !fg_scanout_write(FG_SCAN_DSI+0x008, st0)) return -1;
++ if ((clk & 0x10000u) && !fg_scanout_write(FG_SCAN_DSI+0x120, clk)) return -1;
++ __asm__ volatile("dsb sy" ::: "memory");
++ if (!fg_scanout_write(FG_SCAN_DSI+0x110, (irq & 0xaaaaaaaau) | (1u << 24))) return -1;
++ __asm__ volatile("dsb sy" ::: "memory");
++ if (!fg_scanout_read(FG_SCAN_DSI+0x110, &after)) return -1;
++ if (fg_bl_errclears++ < 12)
++  printf("FUXI BACKLIGHT DSI: %s level=%u errors status0=%#x fifo=%#x ack=%#x dln0=%#x timeout=%#x clk=%#x irq=%#x -> %#x (#%u)\n",
++      why, level, st0, fifo, ack, dln0, tmo, clk, irq, after, fg_bl_errclears);
++ return (after & (1u << 24)) ? 0 : 1;
++}
++/* Under FG_GUARD. 1: nothing waiting, or sent; 0: deferred (the level keeps waiting); -1: scanout stopped. via: 0 START, 1 timer. */
++static int fg_bl_flush(unsigned via)
++{
++ unsigned want = __atomic_load_n(&fg_bl_want, __ATOMIC_ACQUIRE);
++ if (!(want & FG_BL_PENDING)) return 1;
++ if (fg_bl_halted) {
++  (void)__atomic_compare_exchange_n(&fg_bl_want, &want, want & ~FG_BL_PENDING, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
++  return 1;
++ }
++ if (!fg_scanout_requested || !fg_scanout_panel120_requested || fg_scanout_failed || !fuxi_gpu_scanout_owned()) {
++  fg_bl_defer[FG_BL_D_OWNER]++;
++  if (!fg_scanout_requested || !fg_scanout_panel120_requested) {
++   if (!(fg_bl_said & 1)) { fg_bl_said |= 1; printf("FUXI BACKLIGHT DSI: not sent: needs fuxigpuscanout=1 fuxipanel120=1\n"); }
++  }
++  return 0;
++ }
++ if (!fg_scanout_panel120_attempted) { fg_bl_defer[FG_BL_D_PANEL120]++; return 0; }
++ if (fg_scanout_ar_on() || fg_scanout_ar_state == 4 || fg_scanout_mid_dirty) {
++  fg_bl_defer[FG_BL_D_AR]++;
++  if (!(fg_bl_said & 2)) { fg_bl_said |= 2; printf("FUXI BACKLIGHT DSI: deferred: autorefresh or mid-period START owns the trigger\n"); }
++  return 0;
++ }
++ unsigned ar, start, line;
++ if (!fg_scanout_read(FG_SCAN_INTF+0x2b4, &ar) || !fg_scanout_read(FG_SCAN_CTL+0x1c, &start) ||
++     !fg_scanout_read(FG_SCAN_INTF+0x2b0, &line)) return fg_scanout_stop("backlight transfer status");
++ if ((ar & 0x80000000u) || (start & 1) || ((line & 65535) != 0 && (line & 65535) < 2400)) { fg_bl_defer[FG_BL_D_XFER]++; return 0; }
++ unsigned status, ctrl, dma, trigger, irq, tpg, length;
++ int idle = fg_bl_poll(0x008, 0x1f, 0, 0, FG_BL_IDLE_US, &status);
++ if (idle < 0 || !fg_scanout_read(FG_SCAN_DSI+0x004, &ctrl) || !fg_scanout_read(FG_SCAN_DSI+0x03c, &dma) ||
++     !fg_scanout_read(FG_SCAN_DSI+0x084, &trigger) || !fg_scanout_read(FG_SCAN_DSI+0x110, &irq) ||
++     !fg_scanout_read(FG_SCAN_DSI+0x15c, &tpg) || !fg_scanout_read(FG_SCAN_DSI+0x04c, &length))
++  return fg_scanout_stop("backlight setup MMIO");
++ /* A latched error (from the link or an earlier uncertain command): clear it once here rather than deferring every later level. */
++ if (idle && (ctrl & 7) == 5 && !tpg && (irq & (1u << 24))) {
++  int c = fg_bl_errclear("latched error before send", want & FG_BL_MAX);
++  if (c < 0) return fg_scanout_stop("backlight error clear MMIO");
++  if (!fg_scanout_read(FG_SCAN_DSI+0x110, &irq)) return fg_scanout_stop("backlight setup MMIO");
++ }
++ /* The inherited command engine, an idle TPG and no pending error, as fg_panel120_switch requires. */
++ if (!idle || (ctrl & 7) != 5 || tpg || (irq & (1u << 24))) {
++  if (fg_bl_defer[FG_BL_D_DSI]++ < 4)
++   printf("FUXI BACKLIGHT DSI: deferred status=%#x ctrl=%#x tpg=%#x irq=%#x\n", status, ctrl, tpg, irq);
++  return 0;
++ }
++ uint64_t t0 = rsr("cntpct_el0");
++ unsigned level = want & FG_BL_MAX;
++ int r = fg_bl_send(level, trigger, dma, irq, length);
++ uint64_t ticks = rsr("cntpct_el0") - t0;
++ if (r < 0) {
++  printf("FUXI BACKLIGHT DSI: MMIO failure level=%u; panel state uncertain\n", level);
++  return fg_scanout_stop("backlight command MMIO");
++ }
++ if (!r) { fg_bl_defer[FG_BL_D_DSI]++; return 0; }
++ if (r == 2) {
++  unsigned after = 0;
++  int quiet = fg_bl_poll(0x008, 0x1f, 0, 0, FG_SCAN_DSI_TIMEOUT_US, &after);
++  fg_bl_uncertain++;
++  if (quiet != 1) {
++   printf("FUXI BACKLIGHT DSI: level=%u no clean completion and the controller stays busy (status=%#x)\n", level, after);
++   return fg_scanout_stop("backlight command incomplete");
++  }
++  int c = fg_bl_errclear("no clean completion", level);
++  if (c < 0) return fg_scanout_stop("backlight error clear MMIO");
++  if (++fg_bl_uncertain_run >= FG_BL_UNCERTAIN_MAX) {
++   fg_bl_halted = 1;
++   (void)__atomic_compare_exchange_n(&fg_bl_want, &want, want & ~FG_BL_PENDING, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
++   printf("FUXI BACKLIGHT DSI: level=%u %u uncertain commands in a row (%u in all, %u sent); brightness halted for this boot\n",
++       level, fg_bl_uncertain_run, fg_bl_uncertain, fg_bl_sent);
++   return 1;
++  }
++  /* The level stays pending: the next window (START or the retry timer) sends it again. */
++  return 0;
++ }
++ fg_bl_uncertain_run = 0;
++ /* Sent: clear the request unless a newer level arrived meanwhile (it stays pending for the next window). */
++ (void)__atomic_compare_exchange_n(&fg_bl_want, &want, want & ~FG_BL_PENDING, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
++ if (ticks > fg_bl_ticks_max) fg_bl_ticks_max = ticks;
++ if (++fg_bl_sent <= 8 || !(fg_bl_sent & 63)) {
++  uint64_t hz = rsr("cntfrq_el0");
++  unsigned *d = fg_bl_defer;
++  printf("FUXI BACKLIGHT DSI: level=%u sent=%u via=%s us=%llu max_us=%llu deferred owner/panel120/ar/xfer/dsi/gave_up=%u/%u/%u/%u/%u/%u\n",
++      level, fg_bl_sent, via ? "timer" : "start", (unsigned long long)(ticks*1000000/hz),
++      (unsigned long long)(fg_bl_ticks_max*1000000/hz), d[0], d[1], d[2], d[3], d[4], d[5]);
++ }
++ return 1;
++}
++static void fg_bl_run(thread_call_param_t a, thread_call_param_t b)
++{
++ (void)a; (void)b;
++ unsigned again = 0;
++ {
++  FG_GUARD;
++  if (fg_bl_flush(1) == 0) {
++   if (++fg_bl_tries < FG_BL_TRIES) again = 1;
++   else fg_bl_defer[FG_BL_D_GAVE_UP]++;
++  }
++ }
++ if (again) {
++  uint64_t d;
++  nanoseconds_to_absolutetime(FG_BL_RETRY_US*1000ull, &d);
++  (void)thread_call_enter_delayed(&fg_bl_call, mach_absolute_time() + d);
++ }
++}
++/* Any thread, no locks held: store the newest level and try to send it soon. */
++void fuxi_gpu_scanout_backlight(unsigned level);
++void fuxi_gpu_scanout_backlight(unsigned level)
++{
++ unsigned expect = 0;
++ if (level > FG_BL_MAX) level = FG_BL_MAX;
++ __atomic_store_n(&fg_bl_want, FG_BL_PENDING | level, __ATOMIC_RELEASE);
++ __atomic_store_n(&fg_bl_tries, 0u, __ATOMIC_RELAXED);
++ if (__atomic_compare_exchange_n(&fg_bl_call_setup, &expect, 1u, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
++  thread_call_setup_with_options(&fg_bl_call, fg_bl_run, NULL, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
++  __atomic_store_n(&fg_bl_call_setup, 2u, __ATOMIC_RELEASE);
++ }
++ if (__atomic_load_n(&fg_bl_call_setup, __ATOMIC_ACQUIRE) == 2u) (void)thread_call_enter(&fg_bl_call);
++}
 +/* 1 writable, 0 wait, -1 held after error. Normal gates do not spin or sleep;
 + * the one-time panel120 switch uses bounded polling before granting writes.
 + * First
@@ -3686,6 +3937,7 @@
 +     !fg_scanout_read(FG_SCAN_CTL+0x1c, &start) || (start & 1)))
 +  return fg_scanout_stop("publish transfer status");
 + if (fg_abi_mid && !arm_on && !fg_scanout_mid_allow()) return 2; /* outside the tear-safe part of the period: the caller retries */
++ if (!arm_on && fg_bl_flush(0) < 0) return -1; /* fuxibacklight=4: a waiting brightness level goes out before this START */
 + fg_scanout_charge_to(fg_scanout_last_why); /* the last wait ran until this poll */
 + __asm__ volatile("dsb sy" ::: "memory");
 + if (!ov) fg_scanout_writable = 0;
@@ -4041,7 +4293,7 @@
 +SOFTWARE.
 --- a/bsd/dev/fuxi_gpu_abi_backend.inc
 +++ b/bsd/dev/fuxi_gpu_abi_backend.inc
-@@ -0,0 +1,1287 @@
+@@ -0,0 +1,1544 @@
 +/* Built into fuxi_adreno.c, with access to its proven SMMU/ring helpers.
 + * Single privileged diagnostic client, not a security boundary for PM4.
 + * Its root has no scanout or surface-cache mappings. The kernel-only runtime
@@ -4387,6 +4639,254 @@
 + return !g4_tlb(tlb) && !fg_access_failed &&
 +     g3_sr(cb+0x20)==(uint32_t)ttbr && g3_sr(cb+0x24)==(uint32_t)(ttbr>>32);
 +}
++/* Per-IB GPU profile (fuxiearly bit 16, value 16, default off; off, the ring and the fence page are exactly as without it). One job in
++ * FG_IBP_EVERY, one at a time and never with bit 27 parking, gets a CP_WAIT_FOR_IDLE and a CP_REG_TO_MEM of the always-on counter
++ * (19.2 MHz) before each of its IBs and after the last, 5 ring words each, into the fence page at FG_IBP_OFF + 16*i. The stamps leave
++ * the CP thread selection as the stream has it: one Turnip command buffer can span IBs and end one inside a render pass on BR alone,
++ * and on both threads the BR write, the later one, stays. At submit each IB and the IB2s it calls are read (bounded, fault-contained,
++ * through the BO's kernel mapping) for what they do: draws, 2D blits and their area, dispatches, IB2 calls, WFIs, waits, draw-state
++ * groups, event writes (all, CCU and cache ones), CP_WAIT_FOR_ME, the window scissor of each render pass (its count and area), the last colour attachment 0 (RB_MRT[0] BUF_INFO and PITCH) and
++ * the last 2D destination and source; each 2D blit by GRAS_A2D_BLT_CNTL as a solid fill (a clear) or a copy, the copies by
++ * source and destination tiling (linear or not), and the IB's largest blit. At retirement: one line per sampled job (its time per kind of IB) and its FG_IBP_TOP longest
++ * IBs; every 16 samples the time per kind over them. Diagnostic only: the WFIs serialize the IBs. */
++#define FG_IBP_OFF 1536u
++#define FG_IBP_EVERY 96u
++#define FG_IBP_TOP 6u
++#define FG_IBP_BUDGET 24576u
++#define FG_IBP_IB_BUDGET 4096u
++#define FG_IBP_STAMP_WORDS 5u
++_Static_assert(FG_IBP_OFF >= FG_JS_OFF+8u*16u+16u, "IB stamps above the job stamps");
++_Static_assert(FG_IBP_OFF+16u*(NativeAdrenoAbiMaxBuffers+1u) <= 4096u, "IB stamps fit the fence page");
++enum { FG_IBP_K_EMPTY, FG_IBP_K_FULL, FG_IBP_K_PART, FG_IBP_K_BLIT, FG_IBP_K_CS, FG_IBP_K_BAD, FG_IBP_KINDS };
++struct fg_ibp_ib {
++ uint32_t dw, ib2, ib2dw, draws, blits, blit_kpx, cs, wfi, waits, sds, rps, rp_kpx, rt_w, rt_h, rt_info, rt_pitch, d2_info, s2_info, s2_size,
++     tl2, br2, ev, ev_ccu, ev_cache, wfm, bc, clr_kpx, cp_kpx[4], big_kpx, big_s2, big_s2size, big_d2, big_bc,
++     flags, /* cp_kpx: linear->linear, linear->tiled, tiled->linear, tiled->tiled; flags: 1 not in a mapping, 2 out of budget, 4 read fault, 8 unknown packet type, 16 IB chain, 32 IB3, 64 IB2 dedup table full */
++     udraws; /* draws counted once per IB2 address (GMEM calls a render pass's draw IB2 once per bin: draws is per execution) */
++};
++static struct fg_ibp_ib fg_ibp_ibs[NativeAdrenoAbiMaxBuffers];
++static unsigned fg_ibp_on, fg_ibp_count, fg_ibp_active, fg_ibp_scanned;
++static uint32_t fg_ibp_seq, fg_ibp_jobs, fg_ibp_samples, fg_ibp_bad, fg_ibp_stamp[NativeAdrenoAbiMaxBuffers+1u], fg_ibp_d[NativeAdrenoAbiMaxBuffers];
++static uint64_t fg_ibp_kind_t[FG_IBP_KINDS], fg_ibp_kind_n[FG_IBP_KINDS], fg_ibp_span_t;
++static uint32_t fg_ibp_words[FG_ABI_JOB_WORDS+FG_IBP_STAMP_WORDS*(NativeAdrenoAbiMaxBuffers+1u)];
++/* Draw census for per-draw CPU cost: IB2 addresses already scanned in the sampled job (unique draws), its submitter, and the jobs
++ * per submitting pid between the per-16-samples lines (every job while the profile is on; pid lookup only, no scan). */
++#define FG_IBP_SEEN 128u
++#define FG_IBP_PIDS 6u
++extern int proc_selfpid(void);
++extern void proc_selfname(char *buf, int size);
++static uint64_t fg_ibp_seen[FG_IBP_SEEN], fg_ibp_t0;
++static unsigned fg_ibp_nseen;
++static int fg_ibp_pid, fg_ibp_rate_pid[FG_IBP_PIDS];
++static uint32_t fg_ibp_rate_n[FG_IBP_PIDS], fg_ibp_rate_other;
++static char fg_ibp_name[24];
++static void fg_ibp_reset(void)
++{
++ fg_ibp_count=fg_ibp_active=fg_ibp_scanned=0; fg_ibp_seq=fg_ibp_jobs=fg_ibp_samples=fg_ibp_bad=0; fg_ibp_span_t=0;
++ memset(fg_ibp_kind_t,0,sizeof(fg_ibp_kind_t)); memset(fg_ibp_kind_n,0,sizeof(fg_ibp_kind_n));
++ memset(fg_ibp_rate_pid,0,sizeof(fg_ibp_rate_pid)); memset(fg_ibp_rate_n,0,sizeof(fg_ibp_rate_n)); fg_ibp_rate_other=0; fg_ibp_t0=mach_absolute_time();
++}
++/* First visit of this IB2 in the sampled job: its draws count as unique. A full table counts every visit (flag 64). */
++static int fg_ibp_first(struct fg_ibp_ib *r, uint64_t iova)
++{
++ for (unsigned i=0;i<fg_ibp_nseen;i++) if (fg_ibp_seen[i]==iova) return 0;
++ if (fg_ibp_nseen<FG_IBP_SEEN) fg_ibp_seen[fg_ibp_nseen++]=iova; else r->flags|=64;
++ return 1;
++}
++/* Every rung job while the profile is on: count it under its submitter's pid (the client's thread submits). */
++static void fg_ibp_rate(void)
++{
++ const int pid=proc_selfpid();
++ for (unsigned i=0;i<FG_IBP_PIDS;i++) {
++  if (fg_ibp_rate_n[i] && fg_ibp_rate_pid[i]==pid) { fg_ibp_rate_n[i]++; return; }
++  if (!fg_ibp_rate_n[i]) { fg_ibp_rate_pid[i]=pid; fg_ibp_rate_n[i]=1; return; }
++ }
++ fg_ibp_rate_other++;
++}
++/* This submit is sampled (decided before the ring room check; counted only once the job is rung). */
++static int fg_ibp_want(void)
++{
++ if (!fg_ibp_on || fg_abi_pk) return 0;
++ if (fg_ibp_active && (int32_t)(fg_abi_completed-fg_ibp_seq)>=0) { fg_ibp_active=0; fg_ibp_bad++; } /* retired unseen (a fault) */
++ return !fg_ibp_active && fg_ibp_jobs%FG_IBP_EVERY==FG_IBP_EVERY-1u;
++}
++static int fg_ibp_rd(const typeof(fg_abi_maps[0]) *m, uint64_t iova, uint32_t *w)
++{
++ uint64_t v=0;
++ if (iova<m->iova || iova-m->iova+4>m->bytes || !m->source || fuxi_gpu_access(m->source+(uintptr_t)(iova-m->iova),&v,0,0)) return 0;
++ *w=(uint32_t)v;
++ return 1;
++}
++static void fg_ibp_scan(struct fg_ibp_ib *r, uint64_t iova, uint32_t dwords, unsigned depth, unsigned *budget, int uniq)
++{
++ const typeof(fg_abi_maps[0]) *m=fg_abi_map_at(iova);
++ if (!m) { r->flags|=1; return; }
++ for (uint32_t i=0;i<dwords;) {
++  uint32_t h=0;
++  if (!*budget) { r->flags|=2; return; }
++  if (!fg_ibp_rd(m,iova+4ull*i,&h)) { r->flags|=4; return; }
++  --*budget;
++  if (h>>28==4u) {
++   const uint32_t reg=(h>>8)&0x7ffffu, cnt=h&0x7fu;
++   for (uint32_t k=0;k<cnt && i+1+k<dwords;k++) {
++    const uint32_t a=reg+k;
++    uint32_t v=0;
++    if (a!=0x8822 && a!=0x8823 && a!=0x80f1 && a!=0x8c17 && a!=0x8405 && a!=0x8406 && a!=0xb2c0 && a!=0xb2c1 && a!=0x8400) continue;
++    if (!*budget) { r->flags|=2; return; }
++    if (!fg_ibp_rd(m,iova+4ull*(i+1+k),&v)) { r->flags|=4; return; }
++    --*budget;
++    switch (a) {
++     case 0x8822: r->rt_info=v; break;  /* RB_MRT[0].BUF_INFO: format [7:0], tile mode [9:8], UBWC [11] */
++     case 0x8823: r->rt_pitch=v; break; /* RB_MRT[0].PITCH, bytes >> 6 */
++     case 0x80f1: r->rps++; r->rt_w=(v&0x3fffu)+1; r->rt_h=((v>>16)&0x3fffu)+1; r->rp_kpx+=r->rt_w*r->rt_h/1024; break; /* window scissor BR */
++     case 0x8c17: r->d2_info=v; break;  /* RB_A2D_DEST_BUFFER_INFO */
++     case 0x8405: r->tl2=v; break;      /* GRAS_A2D_DEST_TL */
++     case 0x8406: r->br2=v; break;      /* GRAS_A2D_DEST_BR */
++     case 0xb2c0: r->s2_info=v; break;  /* TPL1_A2D_SRC_TEXTURE_INFO */
++     case 0xb2c1: r->s2_size=v; break;  /* TPL1_A2D_SRC_TEXTURE_SIZE */
++     case 0x8400: r->bc=v; break;       /* GRAS_A2D_BLT_CNTL: SOLID_COLOR is bit 7 */
++    }
++   }
++   i+=1+cnt;
++  } else if (h>>28==7u) {
++   const uint32_t op=(h>>16)&0x7fu, cnt=h&0x3fffu;
++   switch (op) {
++    case 0x38: case 0x28: case 0x29: case 0x2a: case 0x24: r->draws++; if (uniq) r->udraws++; break;
++    case 0x2c: {
++     const uint32_t x0=r->tl2&0x3fffu, y0=(r->tl2>>16)&0x3fffu, x1=r->br2&0x3fffu, y1=(r->br2>>16)&0x3fffu;
++     const uint32_t kpx=x1>=x0 && y1>=y0 ? (x1-x0+1)*(y1-y0+1)/1024 : 0;
++     r->blits++; r->blit_kpx+=kpx;
++     if (r->bc&0x80u) r->clr_kpx+=kpx;
++     else r->cp_kpx[(((r->s2_info>>8)&3u) ? 2u : 0u)+(((r->d2_info>>8)&3u) ? 1u : 0u)]+=kpx;
++     if (kpx>r->big_kpx) { r->big_kpx=kpx; r->big_s2=r->bc&0x80u ? 0 : r->s2_info; r->big_s2size=r->bc&0x80u ? 0 : r->s2_size; r->big_d2=r->d2_info; r->big_bc=r->bc; }
++     break; }
++    case 0x33: case 0x41: r->cs++; break;
++    case 0x26: r->wfi++; break;
++    case 0x3c: case 0x12: case 0x14: r->waits++; break;
++    case 0x13: r->wfm++; break;
++    case 0x46: {
++     uint32_t ev=0;
++     r->ev++;
++     if (cnt && i+1<dwords && *budget) {
++      if (!fg_ibp_rd(m,iova+4ull*(i+1),&ev)) { r->flags|=4; return; }
++      --*budget; ev&=0xffu;
++      if (ev==0x18 || ev==0x19 || ev==0x1a || ev==0x1c || ev==0x1d || ev==0x20 || ev==0x21) r->ev_ccu++;
++      else if (ev>=0x30 && ev<=0x33) r->ev_cache++;
++     }
++     break; }
++    case 0x43: r->sds++; break;
++    case 0x57: r->flags|=16; break;
++    case 0x3f:
++     if (cnt==3 && i+3<dwords) {
++      uint32_t lo=0, hi=0, sz=0;
++      if (*budget<3) { r->flags|=2; return; }
++      if (!fg_ibp_rd(m,iova+4ull*(i+1),&lo) || !fg_ibp_rd(m,iova+4ull*(i+2),&hi) || !fg_ibp_rd(m,iova+4ull*(i+3),&sz)) { r->flags|=4; return; }
++      *budget-=3; sz&=0xfffffu;
++      r->ib2++; r->ib2dw+=sz;
++      if (!depth) { const uint64_t a2=(uint64_t)hi<<32|lo; const int u2=uniq && fg_ibp_first(r,a2); fg_ibp_scan(r,a2,sz,1,budget,u2); } else r->flags|=32;
++     }
++     break;
++   }
++   i+=1+cnt;
++  } else { r->flags|=8; return; }
++ }
++}
++static void fg_ibp_decode(const uint64_t *iovas, const uint64_t *sizes, unsigned count)
++{
++ unsigned left=FG_IBP_BUDGET;
++ fg_ibp_nseen=0;
++ fg_ibp_pid=proc_selfpid(); proc_selfname(fg_ibp_name,(int)sizeof(fg_ibp_name));
++ for (unsigned k=0;k<count;k++) {
++  struct fg_ibp_ib *r=&fg_ibp_ibs[k];
++  unsigned b=left<FG_IBP_IB_BUDGET ? left : FG_IBP_IB_BUDGET, b0=b;
++  memset(r,0,sizeof(*r)); r->dw=(uint32_t)(sizes[k]/4);
++  fg_ibp_scan(r,iovas[k],r->dw,0,&b,1);
++  left-=b0-b;
++ }
++ fg_ibp_scanned=FG_IBP_BUDGET-left;
++}
++/* Copy the built frame into fg_ibp_words with a stamp before each IB packet and after the last; zero the stamp slots. 0 (and the frame
++ * stays unstamped) unless every IB packet was found in order. */
++static unsigned fg_ibp_insert(const uint32_t *in, unsigned n, const uint64_t *iovas, const uint64_t *sizes, unsigned count)
++{
++ const uint32_t ib=fg_abi_pkt7(0x3f,3), wfi=fg_abi_pkt7(0x26,0), r2m=fg_abi_pkt7(0x3e,3), reg=0x980|(2u<<18)|(1u<<30);
++ unsigned o=0, k=0;
++#define FG_IBP_STAMP(j) do { fg_ibp_words[o++]=wfi; fg_ibp_words[o++]=r2m; fg_ibp_words[o++]=reg; fg_ibp_words[o++]=G3_FENCE_VA+FG_IBP_OFF+16u*(j); fg_ibp_words[o++]=0; } while (0)
++ for (unsigned i=0;i<n;i++) {
++  if (k<count && i+3<n && in[i]==ib && in[i+1]==(uint32_t)iovas[k] && !in[i+2] && in[i+3]==(uint32_t)(sizes[k]/4)) {
++   FG_IBP_STAMP(k);
++   for (unsigned j=0;j<4;j++) fg_ibp_words[o++]=in[i+j];
++   i+=3;
++   if (++k==count) FG_IBP_STAMP(count);
++   continue;
++  }
++  fg_ibp_words[o++]=in[i];
++ }
++#undef FG_IBP_STAMP
++ if (k!=count) return 0;
++ for (unsigned j=0;j<=count;j++) { g_wr(G3_FENCE_PA,FG_IBP_OFF+16u*j,0); g_wr(G3_FENCE_PA,FG_IBP_OFF+16u*j+4,0); }
++ return o;
++}
++static unsigned fg_ibp_kind(const struct fg_ibp_ib *r)
++{
++ if (r->flags&7u) return FG_IBP_K_BAD;
++ if (r->draws) return r->rt_w*r->rt_h>=2000000u ? FG_IBP_K_FULL : FG_IBP_K_PART;
++ if (r->blits) return FG_IBP_K_BLIT;
++ if (r->cs) return FG_IBP_K_CS;
++ return FG_IBP_K_EMPTY;
++}
++#define FG_IBP_US(t) ((unsigned long long)((t)*10/192))
++/* The sampled job, if retired by this observation ((from, to]). */
++static void fg_ibp_retire(uint32_t from, uint32_t to)
++{
++ if (!fg_ibp_active || fg_ibp_seq-from-1u>=to-from) return;
++ fg_ibp_active=0;
++ const unsigned n=fg_ibp_count;
++ { /* draw census of the whole job (independent of the stamps) */
++  uint32_t dr=0, udr=0, rps=0, bl=0, cs=0, ib2=0, fl=0;
++  for (unsigned i=0;i<n;i++) { const struct fg_ibp_ib *r=&fg_ibp_ibs[i]; dr+=r->draws; udr+=r->udraws; rps+=r->rps; bl+=r->blits; cs+=r->cs; ib2+=r->ib2; fl|=r->flags; }
++  printf("FUXI IBPROF: job %u totals pid %d %s ibs %u dr %u udr %u ib2 %u seen %u rp %u bl %u cs %u fl %x\n",
++      fg_ibp_seq,fg_ibp_pid,fg_ibp_name,n,dr,udr,ib2,fg_ibp_nseen,rps,bl,cs,fl);
++ }
++ unsigned bad=0;
++ for (unsigned i=0;i<=n;i++) { fg_ibp_stamp[i]=g3_read(G3_FENCE_PA+FG_IBP_OFF+16u*i); if (fg_access_failed || !fg_ibp_stamp[i]) bad++; }
++ for (unsigned i=0;i<n && !bad;i++) { fg_ibp_d[i]=fg_ibp_stamp[i+1]-fg_ibp_stamp[i]; if ((int32_t)fg_ibp_d[i]<0) bad++; }
++ if (bad) { fg_ibp_bad++; printf("FUXI IBPROF: job %u ibs %u unusable stamps %u\n",fg_ibp_seq,n,bad); return; }
++ uint64_t kt[FG_IBP_KINDS]={0};
++ const uint64_t span=fg_ibp_stamp[n]-fg_ibp_stamp[0];
++ for (unsigned i=0;i<n;i++) { const unsigned k=fg_ibp_kind(&fg_ibp_ibs[i]); kt[k]+=fg_ibp_d[i]; fg_ibp_kind_t[k]+=fg_ibp_d[i]; fg_ibp_kind_n[k]++; }
++ fg_ibp_samples++; fg_ibp_span_t+=span;
++ printf("FUXI IBPROF: job %u ibs %u span_us %llu scanned_dw %u us empty/full_rt/part_rt/blit/compute/unread %llu/%llu/%llu/%llu/%llu/%llu\n",
++     fg_ibp_seq,n,FG_IBP_US(span),fg_ibp_scanned,FG_IBP_US(kt[0]),FG_IBP_US(kt[1]),FG_IBP_US(kt[2]),FG_IBP_US(kt[3]),FG_IBP_US(kt[4]),FG_IBP_US(kt[5]));
++ uint8_t used[NativeAdrenoAbiMaxBuffers]={0};
++ for (unsigned t=0;t<FG_IBP_TOP && t<n;t++) {
++  unsigned best=n;
++  for (unsigned i=0;i<n;i++) if (!used[i] && (best==n || fg_ibp_d[i]>fg_ibp_d[best])) best=i;
++  used[best]=1;
++  const struct fg_ibp_ib *r=&fg_ibp_ibs[best];
++  printf("FUXI IBPROF: job %u ib %u/%u %lluus dw %u ib2 %u/%u dr %u rp %u/%uK rt %ux%u info %x pitch %u bl %u/%uK d2 %x s2 %x/%x cs %u wfi %u wt %u wfm %u ev %u/%u/%u sds %u fl %x\n",
++      fg_ibp_seq,best,n,FG_IBP_US(fg_ibp_d[best]),r->dw,r->ib2,r->ib2dw,r->draws,r->rps,r->rp_kpx,r->rt_w,r->rt_h,r->rt_info,r->rt_pitch,
++      r->blits,r->blit_kpx,r->d2_info,r->s2_info,r->s2_size,r->cs,r->wfi,r->waits,r->wfm,r->ev,r->ev_ccu,r->ev_cache,r->sds,r->flags);
++  if (r->blits)
++   printf("FUXI IBPROF: job %u ib %u blits clr %uK cp ll/lt/tl/tt %u/%u/%u/%uK big %uK s2 %x/%x d2 %x bc %x\n",
++       fg_ibp_seq,best,r->clr_kpx,r->cp_kpx[0],r->cp_kpx[1],r->cp_kpx[2],r->cp_kpx[3],r->big_kpx,r->big_s2,r->big_s2size,r->big_d2,r->big_bc);
++ }
++ if (!(fg_ibp_samples%16u)) {
++  printf("FUXI IBPROF: per 16 samples span_us avg %llu; us/job (IBs/job) empty %llu (%llu) full_rt %llu (%llu) part_rt %llu (%llu) blit %llu (%llu) compute %llu (%llu) unread %llu (%llu); unusable %u\n",
++      FG_IBP_US(fg_ibp_span_t/16),FG_IBP_US(fg_ibp_kind_t[0]/16),(unsigned long long)((unsigned long long)(fg_ibp_kind_n[0]/16)),FG_IBP_US(fg_ibp_kind_t[1]/16),(unsigned long long)((unsigned long long)(fg_ibp_kind_n[1]/16)),
++      FG_IBP_US(fg_ibp_kind_t[2]/16),(unsigned long long)((unsigned long long)(fg_ibp_kind_n[2]/16)),FG_IBP_US(fg_ibp_kind_t[3]/16),(unsigned long long)((unsigned long long)(fg_ibp_kind_n[3]/16)),FG_IBP_US(fg_ibp_kind_t[4]/16),(unsigned long long)((unsigned long long)(fg_ibp_kind_n[4]/16)),
++      FG_IBP_US(fg_ibp_kind_t[5]/16),(unsigned long long)((unsigned long long)(fg_ibp_kind_n[5]/16)),fg_ibp_bad);
++  fg_ibp_span_t=0; fg_ibp_bad=0; memset(fg_ibp_kind_t,0,sizeof(fg_ibp_kind_t)); memset(fg_ibp_kind_n,0,sizeof(fg_ibp_kind_n));
++  /* jobs per submitting pid since the last such line, and the wall time they took */
++  uint64_t now=mach_absolute_time(), ns=0;
++  absolutetime_to_nanoseconds(now-fg_ibp_t0,&ns);
++  printf("FUXI IBPROF: rate %llu ms jobs pid=n %d=%u %d=%u %d=%u %d=%u %d=%u %d=%u other %u\n",(unsigned long long)(ns/1000000),
++      fg_ibp_rate_pid[0],fg_ibp_rate_n[0],fg_ibp_rate_pid[1],fg_ibp_rate_n[1],fg_ibp_rate_pid[2],fg_ibp_rate_n[2],
++      fg_ibp_rate_pid[3],fg_ibp_rate_n[3],fg_ibp_rate_pid[4],fg_ibp_rate_n[4],fg_ibp_rate_pid[5],fg_ibp_rate_n[5],fg_ibp_rate_other);
++  memset(fg_ibp_rate_pid,0,sizeof(fg_ibp_rate_pid)); memset(fg_ibp_rate_n,0,sizeof(fg_ibp_rate_n)); fg_ibp_rate_other=0; fg_ibp_t0=now;
++ }
++}
++#undef FG_IBP_US
 +/* 16 words of the mapped range that holds `at`, from `start` (clamped to the range): the CP stops on a bad word a few before the one it
 + * reports (NativeAdreno peekIb/peekFetch, MIT). Fault-contained reads of the BO's kernel mapping; no register access. */
 +static void fg_abi_peek(const char *tag, uint64_t at, uint64_t start)
@@ -4588,6 +5088,7 @@
 +  fg_abi_import_cache(1); /* before fence success, even without a user wait */
 +  if (fg_abi_stage) fg_abi_stall_done();
 +  if (fg_js_on) fg_js_retire(fg_abi_completed, fg_abi_seq);
++  if (fg_ibp_on) fg_ibp_retire(fg_abi_completed, fg_abi_seq);
 +  fg_abi_completed = fg_abi_seq;
 +  FG_ABI_WAKE(); fg_client_busy = 0; if (!fg_abi_hold) fg_abi_present_wait = 0; /* hold: the waiting present, not the next client job, takes the idle GPU */
 +  return 0;
@@ -4599,6 +5100,7 @@
 +    fg_abi_import_cache(1); fg_abi_host_handoff=1; /* the newer job's handoff is still open */
 +    if (fg_abi_stage) fg_abi_stall_done();
 +    if (fg_js_on) fg_js_retire(fg_abi_completed, f);
++    if (fg_ibp_on) fg_ibp_retire(fg_abi_completed, f);
 +    fg_abi_completed=f; fg_client_deadline=rsr("cntpct_el0")+rsr("cntfrq_el0")/10;
 +    return 1;
 +   } }
@@ -4626,7 +5128,9 @@
 + fg_abi_ncimport=bits&1; fg_wptr_fence=(bits>>1)&1; fg_abi_unstick=(bits>>2)&1; fg_abi_cohtest=(bits>>6)&1; fg_abi_tlbpages=(bits>>7)&1; fg_abi_mapwait=(bits>>8)&1; fg_abi_queue=(bits>>9)&1; fg_abi_roimport=(bits>>10)&1; fg_abi_pace=(bits>>11)&1; fg_abi_hold=(bits>>12)&1; fg_abi_start=(bits>>13)&1; fg_abi_probe=(bits>>14)&1; fg_abi_spin=(bits>>15)&1; fg_abi_mid=(bits>>16)&1; fg_abi_ar=(bits>>17)&1; fg_abi_hard=(bits>>18)&1; fg_abi_dirty=(bits>>19)&1; fg_abi_cbo=(bits>>29)&1; fg_abi_cbo_on=0; fg_abi_cbo_said=NULL; fg_abi_inline=((bits>>21)&1) && ((bits>>9)&1); fg_abi_cf=fg_abi_inline && ((bits>>4)&1); fg_abi_pk=fg_abi_cf && ((bits>>27)&1); fg_irq_want=(bits>>26)&1; fg_cf_reset(); fg_pk_reset(); fg_inl_ready=fg_root_client=fg_inl_busy=fg_inl_fbmask=0; fg_abi_hold_since=0; fg_abi_present_wait=0; memset(fg_abi_q_stats,0,sizeof(fg_abi_q_stats));
 + if (fg_abi_pk) printf("FUXI GPU: copy_first_park=1 idle_us=%u cap=2 periods (fuxigpuncimport 134217728 with 16, inline mode)\n", FG_PK_IDLE_US);
 + { unsigned early=0; fg_js_on=PE_parse_boot_argn("fuxiearly",&early,sizeof(early)) && (early&8u); fg_js_n=fg_js_bad=0; memset(fg_js_sum,0,sizeof(fg_js_sum)); memset(fg_js_max,0,sizeof(fg_js_max));
-+   if (fg_js_on) printf("FUXI GPU ABI: job_stamps on (fuxiearly bit 8): 12 ring words per job\n"); }
++   if (fg_js_on) printf("FUXI GPU ABI: job_stamps on (fuxiearly bit 8): 12 ring words per job\n");
++   fg_ibp_on=(early&16u)!=0; fg_ibp_reset();
++   if (fg_ibp_on) printf("FUXI GPU ABI: ib_profile on (fuxiearly bit 16): one job in %u, %u ring words per IB\n",FG_IBP_EVERY,FG_IBP_STAMP_WORDS); }
 + fg_abi_coh=fg_abi_coh_tries=0;
 + for (unsigned i=0;i<sizeof(fg_abi_used)/sizeof(fg_abi_used[0]);i++) fg_abi_used[i]=0;
 + /* 772 4K pages: root, two L2s, kernel runtime L3, 768 client L3s.
@@ -5073,6 +5577,7 @@
 + if (!inl && fg_abi_present_held()) { fg_abi_q_stats[4]++; FG_REFUSE(1); }
 + if (fg_pk_n) { int r=fg_pk_flush(FG_PK_SUBMIT); if (r) return r; } /* bit 27: the parked job keeps its place, ahead of this one */
 + if (inl && !fg_abi_pk && fg_abi_copy_first()) FG_REFUSE(1); /* bit 16: the due copy goes first (bit 27 parks below instead) */
++ const int ibp=fg_ibp_want(); /* fuxiearly bit 16: this job gets per-IB stamps */
 + /* Why a submit needed an idle GPU: (1) it installs the client root with a full-ASID invalidate, which would pull the page tables from
 +  * under a running present job; (2) the ring was assumed empty (RPTR==WPTR) and one fence tracked one job; (3) a frame opens with a
 +  * CP context reset, which is safe only after the previous frame's WFI. Behind a running *client* job (1) is moot, (3) is ordered by
@@ -5085,7 +5590,7 @@
 +  if (!inl && fg_abi_present_wait) { fg_abi_q_stats[2]++; FG_REFUSE(3); }
 +  uint32_t used=(g3_wptr-g3_gr(0x806))&8191;
 +  if (fg_access_failed) return fg_abi_fault("client queue ring read");
-+  if (fg_abi_seq-fg_abi_completed>=FG_ABI_QUEUE_MAX || used+(fg_js_on ? FG_ABI_JOB_WORDS : FG_ABI_FRAME_WORDS)+64>8191) { fg_abi_q_stats[3]++; FG_REFUSE(4); }
++  if (fg_abi_seq-fg_abi_completed>=FG_ABI_QUEUE_MAX || used+(fg_js_on ? FG_ABI_JOB_WORDS : FG_ABI_FRAME_WORDS)+(ibp ? FG_IBP_STAMP_WORDS*(count+1) : 0)+64>8191) { fg_abi_q_stats[3]++; FG_REFUSE(4); }
 +  if (g3_faulted()) return fg_abi_fault("client pre-queue fault");
 +  queued=idle>0;
 + } else if (g3_faulted() || g3_gr(0x806)!=g3_wptr || g3_gr(0x807)!=g3_wptr || (g3_gr(0x210)&~1u))
@@ -5095,6 +5600,8 @@
 + unsigned n=fg_abi_frame(words+(fg_js_on ? 4 : 0),iovas,sizes,count,G3_FENCE_VA+FG_ABI_FENCE_OFF,fg_abi_seq,fg_abi_seq+1,1);
 + if (!n) return -1;
 + if (fg_js_on) n=fg_js_wrap(words,n,fg_abi_seq+1);
++ unsigned ibp_on=0;
++ if (ibp) { const unsigned m2=fg_ibp_insert(words,n,iovas,sizes,count); if (m2) { fg_ibp_decode(iovas,sizes,count); words=fg_ibp_words; n=m2; ibp_on=1; } }
 + FG_SS(FG_SS_FRAME);
 + fg_abi_ibs[0]++; fg_abi_ibs[1]+=count; if (count>fg_abi_ibs[2]) fg_abi_ibs[2]=count; if (count>16) fg_abi_ibs[3]++;
 + uint32_t pk_writer=0;
@@ -5130,6 +5637,8 @@
 + fg_abi_submit_map_seq=fg_abi_map_seq;
 + if (!fg_ring_doorbell() || fg_access_failed) return fg_abi_fault("client doorbell");
 + *fence=++fg_abi_seq;
++ if (ibp_on) { fg_ibp_active=1; fg_ibp_seq=fg_abi_seq; fg_ibp_count=count; }
++ if (fg_ibp_on) { fg_ibp_jobs++; fg_ibp_rate(); }
 + FG_SS(FG_SS_BELL);
 + if (queued) {
 +  fg_abi_q_stats[0]++;
@@ -5985,7 +6494,7 @@
 +#define FG_ABI_PA_BITS 36u /* Fuxi ID2.OAS=1; existing present mapper has the same limit. */
 +#define FG_ABI_MAX_BYTES (UINT64_C(1) << 28)
 +/* Internal quotas, independent of the unchanged per-object wire limit. */
-+#define FG_ABI_MAX_BOS 1024u
++#define FG_ABI_MAX_BOS 4096u
 +#define FG_ABI_MAX_WIRED_BYTES (UINT64_C(768) << 20)
 +#define FG_ABI_CONTIG_TRY_BYTES (UINT64_C(1) << 20)
 +#define FG_ABI_MAX_IMPORTS 512u
@@ -6402,7 +6911,7 @@
 +#define FG_ABI_PA_BITS 36u /* Fuxi ID2.OAS=1; existing present mapper has the same limit. */
 +#define FG_ABI_MAX_BYTES (UINT64_C(1) << 28)
 +/* Internal quotas, independent of the unchanged per-object wire limit. */
-+#define FG_ABI_MAX_BOS 1024u
++#define FG_ABI_MAX_BOS 4096u
 +#define FG_ABI_MAX_WIRED_BYTES (UINT64_C(768) << 20)
 +#define FG_ABI_CONTIG_TRY_BYTES (UINT64_C(1) << 20)
 +#define FG_ABI_MAX_IMPORTS 512u

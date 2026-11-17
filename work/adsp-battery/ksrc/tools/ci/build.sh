@@ -242,6 +242,10 @@ setup() {
 kernel() {
     local dxb=$work/dxb variant=${target#kernel-} arm64e=0
     [[ $target == kernel-metal4e ]] && arm64e=1
+    if [[ -n ${FUXI_ATH12K_OBJECT:-} ]]; then
+        [[ $target == kernel-metal4 ]] || die 'ath12k object is supported only for the plain arm64 metal4 kernel'
+        python3 tools/ci/ath12k-link.py "$(dirname "$FUXI_ATH12K_OBJECT")"
+    fi
     python3 tools/test-fuxi-iig-cache.py
     python3 tools/test-fuxi-backlight.py
     python3 tools/test-fuxi-prof.py
@@ -291,6 +295,10 @@ kernel() {
     # MakeInc.kernel installs the raw linked kernel into SYMROOT *without* an
     # .unstripped suffix; give it the local packer's conventional output name.
     cp "$dxb/build/xnu.sym/kernel.development.fuxi" "$out/kernel.development.fuxi.unstripped"
+    if [[ -n ${FUXI_ATH12K_OBJECT:-} ]]; then
+        python3 tools/ci/ath12k-link.py "$(dirname "$FUXI_ATH12K_OBJECT")" \
+            --kernel "$out/kernel.development.fuxi.unstripped" --output "$out/ath12k-link.json"
+    fi
     if [[ $iig_mode != xcode ]]; then
         # XNU-derived (APSL) generated source only: what every build directory
         # compiled, deduplicated and checked against this build's .iig inputs.

@@ -909,3 +909,66 @@ frame came at 9.0 s, compared with 12.4–13.3 s with `fuxibacklight=1`.
 Recommended: `fuxiautolock=30` without `fuxibacklight`. It also locks
 while a video plays with no input, because it does not see iOS idle-timer
 assertions.
+
+## Panel brightness (`fuxibacklight=4`)
+
+Modes 1–3 never received a brightness level: CoreBrightness takes the
+built-in display's backlight only when the service has `backlight-control =
+true` **and** conforms to `AppleARMBacklight` (`-[CBDisplayContaineriOS
+findBacklight]`). This kernel has no Apple `AppleARMBacklight` class, so mode
+4 publishes a service of that class itself (`xnu/fuxi-backlight/
+FuxiDsiBacklight.cpp`), the way AppleCLCD is provided here. Two other
+Xiaomi 13 ports (UniXNU `fuxi-backlight=dsi`, iPadOS 17 / iOS 17) drive the
+same panel with the same DCS command and report working brightness; their
+DSI code is not used here.
+
+```text
+AppleCLCD
+  AppleARMBacklight : IOService
+    backlight-control = true (OSBoolean)
+    IODisplayParameters = { brightness = { min = 0, max = 2047, value = n } }
+```
+
+0–2047 is the panel's normal DBV range (`mi,mdss-dsi-fac-bl-max-level` 0x7ff;
+HBM 0xfff is not offered). `setProperties` accepts `brightness` as a number
+or `{ value = n }`, flat or inside `IODisplayParameters`, plus `FadePeriod`
+(16.16 seconds, capped at 5 s); other keys are accepted and logged. A set
+sign bit is a request for 0. The first request is applied at once (the boot
+loader's level is not read back; 1023 is published until then), later ones
+fade in 16 ms steps on the service's own work loop. Levels below 8 are sent
+as 8 (the panel goes fully dark below that). `setProperties` never waits for
+the work loop.
+
+The service performs no MMIO. Each level goes to the display owner
+(`fuxi_gpu_scanout_backlight`), which sends one DCS 0x51 long write (level
+high byte first) through the same command-DMA FIFO register sequence as the
+panel120 switch, with one packet. It is sent only under `FG_GUARD`, with
+autorefresh off, CTL START clear, the write line idle and the DSI controller
+idle (status, command engine, TPG, no pending error), so no START — always
+written under `FG_GUARD` by `fg_scanout_publish` — can begin a transfer while
+the command is on the link. A waiting level goes out right before the next
+START, or from a thread call retried every 4 ms for about 48 ms on a static
+screen. A newer level replaces one not yet sent. Requirements:
+`fuxigpuscanout=1` (ownership) and `fuxipanel120=1` (the DSI0 window is
+mapped only then); otherwise the level is never sent and one line says so.
+
+After an uncertain command (error status, or no completion within 2 ms) the
+registers are restored as after a good one and brightness stops for that
+boot; if the controller is then still busy after 20 ms, scanout stops with
+the panel held, as after a failed panel120 switch.
+
+Look for:
+
+```text
+FUXI BACKLIGHT DSI: published AppleARMBacklight min=0 max=2047 value=1023; ...
+FUXI BACKLIGHT DSI: setProperties #n process=backboardd keys=k
+FUXI BACKLIGHT DSI: setProperties #n brightness number=... bits=...
+FUXI BACKLIGHT DSI: brightness #n goal=... sent=... fade_ms=... published=1
+FUXI BACKLIGHT DSI: level=... sent=... via=start|timer us=... max_us=... deferred owner/panel120/ar/xfer/dsi/gave_up=...
+```
+
+**Not yet observed on device.** Open questions for the first boot: whether
+iOS 16 CoreBrightness sends levels in the published range and with which
+keys, whether the conformance changes the backboardd startup time seen with
+mode 1, and the DCS time added before a START. Modes 1–3 and the default
+(no argument) are unchanged; mode 4 sends no logical power notifications.

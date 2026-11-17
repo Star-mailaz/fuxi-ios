@@ -522,7 +522,8 @@ def main():
     driver = (ROOT / 'xnu/fuxi-wlan/fuxi_wlan.c').read_text()
     patch = (ROOT / 'xnu/patches/0099-fuxi-wlan.patch').read_text()
     for dest, source in [('fuxi_wlan.c', driver), ('wlan.c', (ROOT / 'shim/fuxi-probe/wlan.c').read_text())]:
-        added = patch.split(f'+++ b/bsd/dev/{dest}\n', 1)[1].split('\n--- a/', 1)[0]
+        added = re.split(r'\n--- (?:a/|/dev/null\n)',
+                         patch.split(f'+++ b/bsd/dev/{dest}\n', 1)[1], maxsplit=1)[0]
         assert int(re.match(r'@@ -0,0 \+1,(\d+) @@', added)[1]) == len(source.splitlines())
         assert ''.join(l[1:] + '\n' for l in added.splitlines() if l.startswith('+')) == source
     assert 'python3 tools/test-fuxi-wlan-m6o.py' in (ROOT / 'tools/ci/build.sh').read_text()

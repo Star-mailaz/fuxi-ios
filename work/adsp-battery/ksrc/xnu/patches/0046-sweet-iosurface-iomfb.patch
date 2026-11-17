@@ -116,7 +116,7 @@
 +#endif /* _SWEET_SURFACE_H */
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetSurface.cpp
-@@ -0,0 +1,872 @@
+@@ -0,0 +1,875 @@
 +/*
 + * Built-in IOSurface for SWEET.
 + *
@@ -703,6 +703,9 @@
 +		put32(p, 0x04, pl->height);
 +		put32(p, 0x08, pl->bytesPerRow);
 +		put32(p, 0x0c, pl->offset);
++		/* IOSurface 16.7 reads the per-plane row stride at client +0xe0
++		 * (result +0x78); keep the legacy +0x08 field unchanged. */
++		put32(p, 0x10, pl->bytesPerRow);
 +		put32(p, 0x14, pl->size);
 +		memcpy(p + 0x18, &pl->bytesPerElement, 2);
 +		p[0x1a] = pl->elementWidth;

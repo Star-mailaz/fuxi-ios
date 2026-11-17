@@ -45,6 +45,7 @@ struct fuxi_wifi_sta_scan {
 	uint16_t frequencies[64], frequency_count;      /* only these channels */
 	bool passive;                           /* only listen */
 	uint16_t dwell_ms;                      /* on each channel; 0: the radio's own */
+	bool cache_allowed;
 };
 
 enum { FUXI_WIFI_STA_OPEN, FUXI_WIFI_STA_WPA2_PSK };
@@ -99,7 +100,32 @@ enum fuxi_wifi_sta_event {
 	                                         * an errno: it was lost (the access point showed us the door) */
 };
 
+/*
+ * ADT /chosen fuxi,wifi-ux（u32 位元遮罩）：Wi-Fi 使用體驗修正，預設 0 = 舊行為，loader 逐項打開。
+ * 2026-11-17 實機（native-hw000wifi-rssiamp-boot-1）看到的三個問題各對一個位元。
+ */
+#define FUXI_WIFI_UX_POWER_ASKED   1u      /* 開關剛按下、電源還沒切完：GET POWER 就回報要求的狀態，
+                                         * 要關時不再收新的掃描／加入（原本要等進行中的掃描做完，開關會彈回約兩秒） */
+#define FUXI_WIFI_UX_PICK_RATE     2u      /* wifid 沒指定 BSSID：照 wpa_supplicant 的比較法以估計速率選 AP
+                                         * （訊號相近時 5 GHz／較寬頻道優先），只看還新鮮、能加入的那些 */
+#define FUXI_WIFI_UX_KEEP_LINK     4u      /* 已連線時再要求加入：先選好（必要時邊連邊掃）再斷線；
+                                         * 選中的就是現在這台 AP 則直接回成功，不斷線 */
+/*
+ * 2026-11-17 native-hw000wifi-wifiux-boot-1 再看到的兩個問題：
+ * wifid 的 SET COUNTRY_CODE（51）一直被拒，WiFiLocaleManager 每秒重試 5 次、之後每 30 秒一次；
+ * 開關在掃描中來回切換，關的要求被後到的開覆蓋，radio 從沒關，iOS 端卻把連線當成斷了，
+ * mac80211 仍連著同一台，再認證回 -EALREADY（join finished 16、使用者看到一直轉圈）。
+ */
+#define FUXI_WIFI_UX_COUNTRY       8u      /* SET 51 收下並記住國家碼（只記、不改 Linux 法規域，也不發
+                                         * COUNTRY_CODE_CHANGED：wifid 收到會清掉掃描快取）；GET 51 回記住的碼 */
+#define FUXI_WIFI_UX_POWER_SAME   16u      /* 要的電源狀態和現在一樣（例如關被開覆蓋）：不呼叫底層、不清連線，
+                                         * 只回報電源事件 */
+#define FUXI_WIFI_UX_ALL          31u
+
 #ifdef KERNEL
+/* 讀一次 ADT 之後記住（ADT 開機後不變）；沒有這個屬性或長度不對都當 0 */
+unsigned fuxi_wifi_ux(void);
+
 /* ---- the station side ---- */
 void     fuxi_wifi_sta_attach(const struct fuxi_wifi_sta_ops *ops);         /* init only; immutable boot-lifetime backend */
 void     fuxi_wifi_sta_lost(int error);                                   /* the network joined is gone by itself */

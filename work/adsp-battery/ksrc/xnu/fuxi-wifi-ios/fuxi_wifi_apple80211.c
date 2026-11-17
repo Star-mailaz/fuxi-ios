@@ -37,15 +37,20 @@
  * 1 success, 21 "invalid PMK" (a wrong passphrase), 9 a timeout, 2 anything else.
  */
 #if defined(FUXI)
+#include <kern/clock.h>
 #include <kern/kalloc.h>
 #include <kern/locks.h>
+#include <kern/thread_call.h>
 #include <libkern/libkern.h>
+#include <pexpert/device_tree.h>
+#include <pexpert/pexpert.h>
 #include <sys/errno.h>
 #include <sys/kern_event.h>
 #include <sys/kernel.h>
 #include <sys/proc.h>
 #include <sys/fuxi_wifi_net.h>
 #include <sys/fuxi_wifi_sta.h>
+#include <sys/fuxi_wifi_ios.h>
 #include <sys/sockio.h>
 #include <sys/systm.h>
 
@@ -82,7 +87,14 @@ type_name(int32_t type)
 
 /* Apple80211's events (APPLE80211_M_...) */
 enum { EVENT_POWER_CHANGED = 1, EVENT_SSID_CHANGED = 2, EVENT_BSSID_CHANGED = 3, EVENT_LINK_CHANGED = 4, EVENT_ASSOC_DONE = 9,
-       EVENT_SCAN_DONE = 10 };
+       EVENT_SCAN_DONE = 10, EVENT_RSSI_CHANGED = 39 };
+
+/*
+ * The radio does not measure its noise floor for us; ath12k's own default stands in for it, so that
+ * a signal-to-noise ratio can be given wherever iOS asks for one.
+ */
+#define NOISE_FLOOR             (-95)
+#define RSSI_EVERY_SECONDS      5       /* how often the network joined is said to be heard so strongly */
 
 static const char interface_name[16] = "en0";   /* (bsd/dev/fuxi_wifi_net.c makes one interface, and that is its name) */
 
@@ -90,6 +102,9 @@ static LCK_GRP_DECLARE(apple80211_lock_group, "fuxi-wifi-apple80211");
 static LCK_MTX_DECLARE(apple80211_lock, &apple80211_lock_group);
 static unsigned result_next;                    /* which of what the last scan heard a SCAN_RESULT request gets next */
 static uint32_t join_result;                    /* of the last join asked for: 0 while it runs, then Apple80211's number */
+/* fuxi,wifi-ux bit 3：wifid 設過的國家碼（ISO 兩字母＋第三字元），只記不用 */
+static uint8_t country_code[3];
+static bool country_known;
 
 /* ---- channels ---------------------------------------------------------------------------------------- */
 
@@ -154,6 +169,9 @@ give_network(const struct apple80211req *request, const struct fuxi_wifi_sta_bss
 	result->version = 1;
 	channel_fill(&result->channel, bss->frequency, 0);
 	result->rssi = bss->rssi;
+	result->noise_known = 1;
+	result->noise = NOISE_FLOOR;
+	result->snr = (int16_t)(bss->rssi - NOISE_FLOOR);
 	result->beacon_interval = bss->beacon_interval;
 	result->capability = bss->capability;
 	memcpy(result->bssid, bss->bssid, sizeof(result->bssid));
@@ -180,6 +198,58 @@ give_network(const struct apple80211req *request, const struct fuxi_wifi_sta_bss
 
 /* ---- get ---------------------------------------------------------------------------------------------- */
 
+/*
+ * RSSI_BOUNDS (106), opt-in with ADT /chosen u32 "fuxi,wifi-rssi" = 1 (the command line is full). IO80211 of 16.5
+ * asks it with 16 bytes, version 1 first, and turns the three int32 after it into RSSI_MIN, RSSI_MAX and
+ * RSSI_THRESHOLD; wifid keeps RSSI_THRESHOLD as WiFiDeviceManager's legacy join floor (+0x80, compared against
+ * every candidate before a join). Refused, that floor stays 0 and every negative-dBm network is "Below minimum
+ * RSSI threshold": no automatic join, ever. ath12k reports the signal as a signed 8-bit dBm, so the bounds are
+ * the limits of that format and the floor is the lowest of them: wifid's own quality policy (its -80/-90 dBm
+ * auto-join passes, the moving-network floors) is left as it is. The same fix as UniXNU's zizhan port (its
+ * device record: g331 automatic association with stock wifid); the layout was read from IO80211 20H392.
+ */
+static bool
+rssi_bounds_enabled(void)
+{
+	DTEntry chosen;
+	void const *prop;
+	unsigned int bytes;
+	uint32_t value = 0;
+
+	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
+	    SecureDTGetProperty(chosen, "fuxi,wifi-rssi", &prop, &bytes) == kSuccess && bytes == sizeof(value)) {
+		memcpy(&value, prop, sizeof(value));
+	}
+	return value == 1;
+}
+
+/* fuxi,wifi-ux 讀過之後的值；bit 31 表示已讀過（測試可清 0 重讀） */
+static uint32_t wifi_ux_cached;
+
+unsigned
+fuxi_wifi_ux(void)
+{
+	uint32_t value = __atomic_load_n(&wifi_ux_cached, __ATOMIC_ACQUIRE);
+
+	if (!(value & 0x80000000u)) {
+		DTEntry chosen;
+		void const *prop;
+		unsigned int bytes;
+		uint32_t read = 0;
+
+		if (SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
+		    SecureDTGetProperty(chosen, "fuxi,wifi-ux", &prop, &bytes) == kSuccess && bytes == sizeof(read)) {
+			memcpy(&read, prop, sizeof(read));
+		}
+		value = (read & FUXI_WIFI_UX_ALL) | 0x80000000u;
+		__atomic_store_n(&wifi_ux_cached, value, __ATOMIC_RELEASE);
+		printf("FUXI WIFI IOS: ux options 0x%x (power-asked %u, pick-rate %u, keep-link %u, country %u, power-same %u)\n",
+		    value & FUXI_WIFI_UX_ALL, !!(value & FUXI_WIFI_UX_POWER_ASKED), !!(value & FUXI_WIFI_UX_PICK_RATE),
+		    !!(value & FUXI_WIFI_UX_KEEP_LINK), !!(value & FUXI_WIFI_UX_COUNTRY), !!(value & FUXI_WIFI_UX_POWER_SAME));
+	}
+	return value & FUXI_WIFI_UX_ALL;
+}
+
 static int
 get(struct apple80211req *request)
 {
@@ -190,8 +260,9 @@ get(struct apple80211req *request)
 	case 43:
 	case 44: {                              /* the driver's and the hardware's name: the text alone, in 256 bytes */
 		static const char name[256] = "Fuxi Wi-Fi iOS shim (synthetic backend)";
+		static const char native_name[256] = "Fuxi WCN7850 ath12k (native power/scan)";
 
-		return give(request, name, sizeof(name));
+		return give(request, fuxi_wifi_ios_native_ready() ? native_name : name, sizeof(name));
 	}
 	case 12: {
 		/*
@@ -219,6 +290,17 @@ get(struct apple80211req *request)
 	case 15:                                /* the mode: a station (APPLE80211_M_STA) */
 		request->req_val = 1;
 		return 0;
+	case 106: {                             /* the strengths the radio can report, and the floor to join at */
+		struct {
+			uint32_t version;
+			int32_t minimum, maximum, threshold;
+		} answer = { .version = 1, .minimum = INT8_MIN, .maximum = INT8_MAX, .threshold = INT8_MIN };
+
+		if (!rssi_bounds_enabled()) {
+			break;                  /* refused below, as before */
+		}
+		return give(request, &answer, sizeof(answer));
+	}
 	case 27:
 	case 254: {                             /* the channels the radio may tune to */
 		struct apple80211_channels *answer;
@@ -258,6 +340,25 @@ get(struct apple80211req *request)
 		error = give(request, answer, sizeof(*answer));
 		kfree_data(answer, sizeof(*answer));
 		return error;
+	}
+	case 51: {                              /* the country code wifid set (fuxi,wifi-ux bit 3) */
+		struct {
+			uint32_t version;
+			uint8_t code[4];
+		} answer = { .version = 1 };
+
+		if (!(fuxi_wifi_ux() & FUXI_WIFI_UX_COUNTRY)) {
+			break;                  /* refused below, as before */
+		}
+		lck_mtx_lock(&apple80211_lock);
+		bool known = country_known;
+		memcpy(answer.code, country_code, sizeof(country_code));
+		lck_mtx_unlock(&apple80211_lock);
+		if (!known) {
+			break;                  /* not set yet: refused below, as before */
+		}
+		/* 長度不到 8 的呼叫者只要三個字元；8 以上是 version＋cc[3] */
+		return request->req_len < sizeof(answer) ? give(request, answer.code, 3) : give(request, &answer, sizeof(answer));
 	}
 	case 21:                                /* how the last join went (0: not over yet) */
 		lck_mtx_lock(&apple80211_lock);
@@ -328,7 +429,17 @@ get(struct apple80211req *request)
 		error = state->phase != FUXI_WIFI_STA_JOINED ? ENXIO : give(request, &answer, sizeof(answer));
 		break;
 	}
-	case 103:                               /* all of it, as a scan's result */
+	case 17: {                              /* the noise under it, laid out as the strength is */
+		struct {
+			uint32_t version, radios, unit;
+			int32_t each[4], all, each_ext[4], all_ext;
+		} answer = { .version = 1, .radios = 1, .each = { NOISE_FLOOR }, .all = NOISE_FLOOR,
+			     .each_ext = { NOISE_FLOOR }, .all_ext = NOISE_FLOOR };
+
+		error = state->phase != FUXI_WIFI_STA_JOINED ? ENXIO : give(request, &answer, sizeof(answer));
+		break;
+	}
+	case 103:                             /* all of it, as a scan's result */
 		error = state->phase != FUXI_WIFI_STA_JOINED ? ENXIO : give_network(request, &state->bss);
 		break;
 	case 2: {                               /* how it was joined: open system, then WPA2 with a passphrase */
@@ -379,6 +490,7 @@ set_scan(const struct apple80211req *request, char *said, size_t said_size)
 		memcpy(what->ssid, asked->ssid, asked->ssid_length);
 	}
 	what->passive = asked->scan_type == 2;
+	what->cache_allowed = asked->scan_type == 3;
 	what->dwell_ms = asked->dwell_ms;
 	/* (more channels than there is room to name: every channel) */
 	for (unsigned i = 0; i < asked->channel_count && i < 400 && asked->channel_count <= 64; i++) {
@@ -487,6 +599,50 @@ set(const struct apple80211req *request, char *said, size_t said_size)
 		snprintf(said, said_size, " (power: %s)", asked.state[0] ? "on" : "off");
 		return fuxi_wifi_sta_ask_power(asked.state[0] != 0);
 	}
+	case 51: {                              /* the country code (fuxi,wifi-ux bit 3): kept, not applied */
+		/*
+		 * IO80211 框架把 wifid 的 CFString 轉成 version(u32)＋cc[3]（Apple80211Set 長度 8）；
+		 * 只有 3 bytes 時當成 cc[3] 本身。兩字母要是大寫英文或數字，第三字元可為空白、NUL 或可印字元。
+		 */
+		uint8_t bytes[8] = { 0 }, *code;
+		const char *layout;
+		int error;
+
+		if (!(fuxi_wifi_ux() & FUXI_WIFI_UX_COUNTRY)) {
+			return EOPNOTSUPP;
+		}
+		if (request->req_len < 3 || request->req_data == USER_ADDR_NULL) {
+			return EINVAL;
+		}
+		if ((error = copyin(request->req_data, bytes, request->req_len < sizeof(bytes) ? request->req_len :
+		    sizeof(bytes))) != 0) {
+			return error;
+		}
+		if (request->req_len < 7) {
+			code = bytes;
+			layout = "cc";
+		} else {
+			code = bytes + 4;
+			layout = "version+cc";
+		}
+		for (unsigned i = 0; i < 2; i++) {
+			if (!((code[i] >= 'A' && code[i] <= 'Z') || (code[i] >= '0' && code[i] <= '9'))) {
+				snprintf(said, said_size, " (country: not a code, %s)", layout);
+				return EINVAL;
+			}
+		}
+		if (code[2] != 0 && (code[2] < 0x20 || code[2] > 0x7e)) {
+			snprintf(said, said_size, " (country: not a code, %s)", layout);
+			return EINVAL;
+		}
+		lck_mtx_lock(&apple80211_lock);
+		bool changed = !country_known || memcmp(country_code, code, sizeof(country_code)) != 0;
+		memcpy(country_code, code, sizeof(country_code));
+		country_known = true;
+		lck_mtx_unlock(&apple80211_lock);
+		snprintf(said, said_size, " (country: %c%c, %s, %s)", code[0], code[1], layout, changed ? "kept" : "same");
+		return 0;
+	}
 	case 10:
 		return set_scan(request, said, said_size);
 	default:
@@ -496,12 +652,14 @@ set(const struct apple80211req *request, char *said, size_t said_size)
 
 /* ---- events -------------------------------------------------------------------------------------------- */
 
-static void
+static int
 post(uint32_t code, const void *data, uint32_t length)
 {
 	struct kev_msg message = { .vendor_code = KEV_VENDOR_APPLE, .kev_class = KEV_IEEE80211_CLASS, .kev_subclass = 1,
 		                   .event_code = code };
+	static unsigned failed;
 	char name[16];
+	int error;
 
 	memcpy(name, interface_name, sizeof(name));
 	message.dv[0].data_length = sizeof(name);
@@ -510,7 +668,90 @@ post(uint32_t code, const void *data, uint32_t length)
 		message.dv[1].data_length = length;
 		message.dv[1].data_ptr = __DECONST(void *, data);
 	}
-	kev_post_msg(&message);
+	error = kev_post_msg(&message);
+	/* (an event that cannot be posted is never seen by wifid: say so, a few times) */
+	if (error != 0 && failed < 20) {
+		failed++;
+		printf("FUXI WIFI IOS: apple80211: event %u of %u bytes not posted: error %d\n", code, length, error);
+	}
+	return error;
+}
+
+/*
+ * How strongly the network joined is heard, as a driver says it of itself every few seconds: wifid
+ * reads no strength of its own accord, and without it the status bar shows a joined network with
+ * no bars at all. True while there is a network to speak of.
+ */
+static bool
+rssi_tell(void)
+{
+	struct fuxi_wifi_sta_state *state = kalloc_data(sizeof(*state), Z_WAITOK | Z_ZERO);
+	bool joined;
+
+	if (state == NULL) {
+		return true;                    /* (try again next time) */
+	}
+	fuxi_wifi_sta_state(state);
+	joined = state->phase == FUXI_WIFI_STA_JOINED;
+	if (joined && state->bss.rssi < 0) {
+		struct apple80211_rssi_changed rssi = { .rssi_known = 1, .rssi = state->bss.rssi, .per_core_known = 1,
+			                                .per_core = { (int8_t)state->bss.rssi, (int8_t)state->bss.rssi }, .snr_known = 1,
+			                                .snr = (int16_t)(state->bss.rssi - NOISE_FLOOR), .noise_known = 1,
+			                                .noise = NOISE_FLOOR };
+		static unsigned told;
+		int error = post(EVENT_RSSI_CHANGED, &rssi, sizeof(rssi));
+
+		/* (the first few are said, so a run shows that wifid was told at all) */
+		if (told < 3) {
+			told++;
+			printf("FUXI WIFI IOS: apple80211: RSSI_CHANGED %d dBm (noise %d) posted: error %d\n", state->bss.rssi,
+			    NOISE_FLOOR, error);
+		}
+	}
+	kfree_data(state, sizeof(*state));
+	return joined;
+}
+
+static thread_call_t rssi_call;
+static bool rssi_running;
+
+static void
+rssi_again(void)
+{
+	uint64_t deadline;
+
+	clock_interval_to_deadline(RSSI_EVERY_SECONDS, NSEC_PER_SEC, &deadline);
+	thread_call_enter_delayed(rssi_call, deadline);
+}
+
+static void
+rssi_tick(thread_call_param_t param0 __unused, thread_call_param_t param1 __unused)
+{
+	bool joined = rssi_tell();
+
+	lck_mtx_lock(&apple80211_lock);
+	if (joined && rssi_running) {
+		rssi_again();
+	} else {
+		rssi_running = false;
+	}
+	lck_mtx_unlock(&apple80211_lock);
+}
+
+/* A network is joined: say how well it is heard now, and from now on until it is left. */
+static void
+rssi_start(void)
+{
+	(void)rssi_tell();
+	lck_mtx_lock(&apple80211_lock);
+	if (rssi_call == NULL) {
+		rssi_call = thread_call_allocate(rssi_tick, NULL);
+	}
+	if (rssi_call != NULL && !rssi_running) {
+		rssi_running = true;
+		rssi_again();
+	}
+	lck_mtx_unlock(&apple80211_lock);
 }
 
 /* What the station side says has happened (bsd/dev/fuxi_wifi_sta.c calls this, on its thread or the station's). */
@@ -548,11 +789,20 @@ fuxi_wifi_apple80211_event(enum fuxi_wifi_sta_event event, int status)
 		if (state != NULL) {
 			fuxi_wifi_sta_state(state);
 			link.rssi = status == 1 ? state->bss.rssi : 0;
+			link.snr = status == 1 ? (uint16_t)(state->bss.rssi - NOISE_FLOOR) : 0;
+			link.noise = status == 1 ? (uint16_t)NOISE_FLOOR : 0;
 			kfree_data(state, sizeof(*state));
 		}
 		post(EVENT_SSID_CHANGED, NULL, 0);
 		post(EVENT_BSSID_CHANGED, NULL, 0);
 		post(EVENT_LINK_CHANGED, &link, sizeof(link));
+		if (status == 1) {
+			rssi_start();
+		} else {
+			lck_mtx_lock(&apple80211_lock);
+			rssi_running = false;           /* (the one pending finds no network and stops) */
+			lck_mtx_unlock(&apple80211_lock);
+		}
 		break;
 	}
 	}
@@ -609,11 +859,38 @@ fuxi_wifi_apple80211_summary(void)
 	}
 }
 
+extern void sweet_prof_user_bt(const char *tag);
+
+static void
+trace_unsupported_request(int32_t type, bool is_set, int error, const char *caller)
+{
+	static unsigned traces;
+	int enabled = 0;
+
+	if (!is_set || type != 383 || error != EOPNOTSUPP || strcmp(caller, "wifid") ||
+	    !fuxi_wifi_ios_native_ready()) {
+		return;
+	}
+	PE_parse_boot_argn("fuxiwifitrace", &enabled, sizeof(enabled));
+	if (enabled != 1) {
+		return;
+	}
+	lck_mtx_lock(&apple80211_lock);
+	bool allowed = traces < 2;
+	if (allowed) {
+		traces++;
+	}
+	lck_mtx_unlock(&apple80211_lock);
+	if (allowed) {
+		sweet_prof_user_bt("FUXI WIFI IOC383");
+	}
+}
+
 /* An Apple80211 request for the radio's interface, from the process that is running now. */
 errno_t
 fuxi_wifi_apple80211_ioctl(u_long command, void *data)
 {
-	static unsigned said;
+	static unsigned said_gets, said_sets;
 	struct apple80211req *request = data;
 	char who[32] = "?", what[200] = "";
 	bool is_set = command == SIOCSA80211;
@@ -631,9 +908,13 @@ fuxi_wifi_apple80211_ioctl(u_long command, void *data)
 	proc_selfname(who, sizeof(who));
 	error = is_set ? set(request, what, sizeof(what)) : get(request);
 	note(request, is_set, error);
-	/* (a request that is repeated for ever is said a few hundred times) */
-	if (said < 800) {
-		said++;
+	/*
+	 * (a request that is repeated for ever is said a few hundred times; sets — scans, power, joins,
+	 * the country — come far less often and matter late in a run too, so they get their own allowance)
+	 */
+	unsigned *said = is_set ? &said_sets : &said_gets;
+	if (*said < (is_set ? 3000u : 800u)) {
+		(*said)++;
 		printf("FUXI WIFI IOS: apple80211: %s %s %d (%s), value %d, %u bytes%s: %s", who, is_set ? "sets" : "gets", request->req_type,
 		    type_name(request->req_type), request->req_val, request->req_len, what, error == 0 ? "answered\n" : error ==
 		    EOPNOTSUPP ? "REFUSED\n" : "");
@@ -641,6 +922,7 @@ fuxi_wifi_apple80211_ioctl(u_long command, void *data)
 			printf("error %d\n", error);
 		}
 	}
+	trace_unsupported_request(request->req_type, is_set, error, who);
 	return error;
 }
 

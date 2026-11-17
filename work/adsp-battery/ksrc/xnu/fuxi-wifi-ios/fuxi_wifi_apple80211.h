@@ -114,6 +114,28 @@ struct apple80211_link_changed {
 	uint8_t unused_3[4];
 };
 
+/*
+ * RSSI_CHANGED's data (event 39): IO80211.framework of 16.5 drops one shorter than 180 bytes and
+ * makes a dictionary of the parts whose flag is set ("RSSI", "PER_CORE_RSSI", "SNR", "NOISE", "CCA");
+ * wifid computes the status bar's strength from "RSSI" and ignores one that comes within a second.
+ */
+struct apple80211_rssi_changed {
+	uint8_t rssi_known, unused_0[3];
+	int32_t rssi;                           /* dBm */
+	uint8_t per_core_known;
+	int8_t per_core[2];                     /* dBm, -128: no such chain */
+	uint8_t snr_known;
+	int16_t snr;                            /* dB */
+	uint8_t noise_known, unused_1;
+	int16_t noise;                          /* dBm */
+	uint8_t cca_known;
+	int8_t cca;
+	uint8_t unused_2[180 - 0x14];           /* what was sent and how fast: not said */
+};
+
+_Static_assert(sizeof(struct apple80211_rssi_changed) == 180 && offsetof(struct apple80211_rssi_changed, snr) == 0xc &&
+    offsetof(struct apple80211_rssi_changed, noise) == 0x10 && offsetof(struct apple80211_rssi_changed, cca) == 0x13,
+    "the RSSI event as iOS 16.5 reads it");
 _Static_assert(sizeof(struct apple80211_assoc) == 592 && offsetof(struct apple80211_assoc, key) == 0x48,
     "the association request as iOS 16.5 has it");
 _Static_assert(sizeof(struct apple80211_link_changed) == 32 && offsetof(struct apple80211_link_changed, reason) == 0x14,

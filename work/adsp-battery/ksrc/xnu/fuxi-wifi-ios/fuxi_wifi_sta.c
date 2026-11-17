@@ -20,6 +20,7 @@
  * Fuxi omits the root-file standing/fallback network: wifid owns rejoin policy.
  */
 #if defined(FUXI)
+#include <kern/clock.h>
 #include <kern/kalloc.h>
 #include <kern/locks.h>
 #include <kern/sched_prim.h>
@@ -42,6 +43,18 @@ static const struct fuxi_wifi_sta_ops *sta_ops;   /* the station side, while the
 static bool sta_thread_made;
 static bool sta_calls;                          /* the thread is in a call of the station side's */
 static bool sta_on;                             /* the radio's power, as last asked for */
+/* fuxi,wifi-ux bit 0：電源要求已從佇列取出、正在切換時的目標 */
+static bool power_running, power_running_on;
+/* 這一批電源要求中第一個的時間（ms）：紀錄「按下開關到開始切換」等了多久 */
+static uint64_t power_asked_at;
+
+static uint64_t
+sta_now_ms(void)
+{
+	uint64_t ns = 0;
+	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+	return ns / 1000000ull;
+}
 
 /* what has been asked for and not begun */
 static bool asked_power, asked_power_on, asked_scan, asked_join, asked_leave;
@@ -86,6 +99,8 @@ sta_runs(__unused void *parameter, __unused wait_result_t result)
 			power = true;
 			power_on = asked_power_on;
 			asked_power = false;
+			power_running = true;
+			power_running_on = power_on;
 		} else if (asked_leave) {
 			leave = true;
 			asked_leave = false;
@@ -105,22 +120,33 @@ sta_runs(__unused void *parameter, __unused wait_result_t result)
 		if (power) {
 			struct fuxi_wifi_sta_state *state = kalloc_data(sizeof(*state), Z_WAITOK | Z_ZERO);
 			bool was_joined = false;
+			uint64_t began = sta_now_ms();
 
 			if (state != NULL) {
 				ops->state(state);
 				was_joined = state->phase == FUXI_WIFI_STA_JOINED;
 				kfree_data(state, sizeof(*state));
 			}
-			error = ops->power(power_on);
 			lck_mtx_lock(&sta_lock);
-			if (!asked_power) {
-				sta_on = error == 0 ? power_on : !power_on;
-			}
+			/* fuxi,wifi-ux bit 4：要的和現在一樣就不碰底層（底層重開會清掉連線，mac80211 卻還連著） */
+			bool same = (fuxi_wifi_ux() & FUXI_WIFI_UX_POWER_SAME) && power_on == sta_on;
+			uint64_t waited = power_asked_at && began >= power_asked_at ? began - power_asked_at : 0;
 			lck_mtx_unlock(&sta_lock);
-			if (!power_on && was_joined) {
+			if (!same) {
+				error = ops->power(power_on);
+			}
+			lck_mtx_lock(&sta_lock);
+			if (error == 0) { sta_on = power_on; }
+			power_running = false;
+			bool confirmed_on = sta_on;
+			lck_mtx_unlock(&sta_lock);
+			printf("FUXI WIFI IOS: power %s %s %d: waited %llu ms, took %llu ms, joined %u\n", power_on ? "on" : "off",
+			    same ? "kept (already so)" : "applied", error, (unsigned long long)waited,
+			    (unsigned long long)(sta_now_ms() - began), was_joined);
+			if (!power_on && was_joined && !same) {
 				fuxi_wifi_apple80211_event(FUXI_WIFI_STA_LINK, 0);
 			}
-			fuxi_wifi_apple80211_event(FUXI_WIFI_STA_POWER, error == 0 ? power_on : !power_on);
+			fuxi_wifi_apple80211_event(FUXI_WIFI_STA_POWER, confirmed_on);
 		} else if (leave) {
 			ops->leave();
 			fuxi_wifi_apple80211_event(FUXI_WIFI_STA_LINK, 0);
@@ -179,10 +205,12 @@ fuxi_wifi_sta_attach(const struct fuxi_wifi_sta_ops *ops)
 	}
 	lck_mtx_lock(&sta_lock);
 	sta_ops = ops;
-	sta_on = true;
+	struct fuxi_wifi_sta_state initial;
+	ops->state(&initial);
+	sta_on = initial.phase != FUXI_WIFI_STA_OFF;
 	lck_mtx_unlock(&sta_lock);
 	thread_wakeup((event_t)&sta_ops);
-	fuxi_wifi_apple80211_event(FUXI_WIFI_STA_POWER, 1);
+	fuxi_wifi_apple80211_event(FUXI_WIFI_STA_POWER, sta_on);
 }
 
 void
@@ -203,14 +231,49 @@ fuxi_wifi_sta_present(void)
 	return present;
 }
 
+/*
+ * fuxi,wifi-ux bit 0：還沒切完的電源要求算數。true：要關（或正在關），false：其餘。
+ * 呼叫者持有 sta_lock。
+ */
+static bool
+power_wanted(bool *on)
+{
+	if (!(fuxi_wifi_ux() & FUXI_WIFI_UX_POWER_ASKED)) {
+		return false;
+	}
+	if (asked_power) {
+		*on = asked_power_on;
+		return true;
+	}
+	if (power_running) {
+		*on = power_running_on;
+		return true;
+	}
+	return false;
+}
+
 bool
 fuxi_wifi_sta_powered(void)
 {
-	bool on;
+	bool on, wanted;
 	lck_mtx_lock(&sta_lock);
 	on = sta_ops != NULL && sta_on;
+	if (sta_ops != NULL && power_wanted(&wanted)) {
+		on = wanted;
+	}
 	lck_mtx_unlock(&sta_lock);
 	return on;
+}
+
+/* 能不能再收掃描／加入：電源是開的或正要開；bit 0 打開時，正要關就不收 */
+static bool
+power_accepts(void)
+{
+	bool wanted;
+	if (power_wanted(&wanted)) {
+		return wanted;
+	}
+	return sta_on || (asked_power && asked_power_on);
 }
 
 bool
@@ -232,7 +295,9 @@ fuxi_wifi_sta_ask_power(bool on)
 		lck_mtx_unlock(&sta_lock);
 		return ENXIO;
 	}
-	sta_on = on;
+	if (!asked_power) {
+		power_asked_at = sta_now_ms();
+	}
 	asked_power = true;
 	asked_power_on = on;
 	if (!on) {
@@ -252,7 +317,7 @@ fuxi_wifi_sta_ask_scan(const struct fuxi_wifi_sta_scan *what)
 		return EINVAL;
 	}
 	lck_mtx_lock(&sta_lock);
-	if (sta_ops == NULL || !sta_on) {
+	if (sta_ops == NULL || !power_accepts()) {
 		lck_mtx_unlock(&sta_lock);
 		return sta_ops == NULL ? ENXIO : ENETDOWN;
 	}
@@ -272,7 +337,7 @@ fuxi_wifi_sta_ask_join(const struct fuxi_wifi_sta_join *what)
 		return EINVAL;
 	}
 	lck_mtx_lock(&sta_lock);
-	if (sta_ops == NULL || !sta_on) {
+	if (sta_ops == NULL || !power_accepts()) {
 		lck_mtx_unlock(&sta_lock);
 		return sta_ops == NULL ? ENXIO : ENETDOWN;
 	}

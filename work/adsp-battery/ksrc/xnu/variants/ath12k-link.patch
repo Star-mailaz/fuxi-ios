@@ -1,0 +1,29 @@
+--- a/makedefs/MakeInc.def
++++ b/makedefs/MakeInc.def
+@@ -854,6 +854,18 @@
+ 
+ LDFILES_KERNEL_ONLY = $(TARGET)/all-kpi.exp $(TARGET)/all-alias.exp $(TARGET)/symbolsets.plist
+ 
++ifneq ($(strip $(FUXI_ATH12K_OBJECT)),)
++ifeq ($(CURRENT_ARCH_CONFIG)-$(CURRENT_MACHINE_CONFIG),ARM64-FUXI)
++LDFILES_KERNEL_ONLY += $(FUXI_ATH12K_OBJECT)
++LDFLAGS_KERNEL_ONLY += -Wl,-u,_nw_wifi_start,-u,_nw_wifi_step,-u,_nw_wifi_stop \
++    -Wl,-u,_nw_wifi_poll,-u,_nw_wifi_irq_mode,-u,_nw_wifi_scan \
++    -Wl,-u,_nw_wifi_bss_count,-u,_nw_wifi_bss_get,-u,_nw_wifi_stats \
++    -Wl,-u,_nw_wifi_set_platform,-u,_nw_wifi_control_transport_set \
++    -Wl,-u,_nw_wifi_control_attach,-u,_nw_wifi_control_receive \
++    -Wl,-u,_nw_wifi_power
++endif
++endif
++
+ #
+ # Default runtime libraries to be linked with the kernel
+ #
+--- a/bsd/dev/fuxi_wlan_ath12k.h
++++ b/bsd/dev/fuxi_wlan_ath12k.h
+@@ -1,4 +1,5 @@
+ #ifndef FUXI_WLAN_ATH12K_H
+ #define FUXI_WLAN_ATH12K_H
++#define FUXI_ATH12K_LINKED 1
+ #include <stdint.h>
+ #include <stddef.h>

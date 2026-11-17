@@ -78,6 +78,7 @@
 #include <vm/pmap.h>
 #include <arm/caches_internal.h>
 #include "sweet_spmi_bus.h"
+#include "fuxi_rpmh_shared.h"
 /* osfmk/vm/pmap.h declares these under MACH_KERNEL_PRIVATE only; bsd/ cannot
  * see them, but they are in the same kernel image (M6k fuxiwlanprobe=nc). */
 /* pexpert exposes the string-only parser under XNU_KERNEL_PRIVATE. */
@@ -258,8 +259,8 @@ ts_gpio(unsigned n, unsigned func, unsigned pull, unsigned ma, int out)
 }
 
 /* ACTIVE TCS transport shared by the existing WLAN regulator votes and M6i.
- * RSC v3: TCS stride 672, command stride 24 (rpmh-rsc.c). No other XNU
- * code drives the fuxi apps RSC. Never touch inherited busy TCS state; an
+ * RSC v3: TCS stride 672, command stride 24 (rpmh-rsc.c). The ADSP uses the
+ * same shared mutex. Never touch inherited busy TCS state; an
  * uncertain transaction is quarantined for the session. */
 #define RH_STRIDE 0x2a0u
 #define RH_WAIT   0x20u
@@ -280,7 +281,7 @@ rh_wr(uint32_t off, uint32_t v)
 struct wl_rh_cmd { uint32_t addr, data, wait; };
 static bool rh_poisoned;
 static uint32_t
-rh_send_request(unsigned t, const struct wl_rh_cmd *cmd, unsigned n, bool regulator)
+rh_send_request_locked(unsigned t, const struct wl_rh_cmd *cmd, unsigned n, bool regulator)
 {
 	/* DRV2 has three ACTIVE TCSs; preserve all sleep/wake/other slots. */
 	if (t >= 3 || !n || n > 16 || rh_poisoned || fw_faults) { return 1; }
@@ -350,6 +351,14 @@ rh_send_request(unsigned t, const struct wl_rh_cmd *cmd, unsigned n, bool regula
 	    rh_rd(b + RH_WAIT) || (rh_rd(4) & bit) || !rh_rd(b + RH_IDLE) || fw_faults) { return 3; }
 	rh_poisoned = false;
 	return 0;
+}
+static uint32_t
+rh_send_request(unsigned t, const struct wl_rh_cmd *cmd, unsigned n, bool regulator)
+{
+	if (fuxi_rpmh_acquire()) { return 1; }
+	uint32_t result = rh_send_request_locked(t, cmd, n, regulator);
+	fuxi_rpmh_release(!rh_poisoned);
+	return result;
 }
 static uint32_t
 rh_send_batch(unsigned t, const struct wl_rh_cmd *cmd, unsigned n)
@@ -726,8 +735,13 @@ static bool wl_mhi_valid;
 struct wl_dma { vm_offset_t va; vm_size_t size; uint64_t pa, iova; bool nc; };
 static struct wl_dma wl_image, wl_vectors, wl_contexts, wl_tables;
 static struct wl_dma wl_amss; /* full file when BHI uses a separate prefix */
+static struct wl_dma wl_ath_arena;
+static bool wl_ath_enabled;
+static void wl_ath_release(void);
 static bool wl_qrtr, wl_w12, wl_w13, wl_w14, wl_w15, wl_w11_attempted, wl_w11_ok;
 static unsigned wl15_variant, wl16_variant, wl12_mlo_variant;
+static bool wl18_enabled, wl18_host_cap, wl18_cap_invalid;
+static bool wl18_omit_nm_modem;
 static unsigned wl_rails_variant;
 static bool wl_rails_requested;
 static bool wl16_large, wl16_redrive;
@@ -753,7 +767,10 @@ static bool wl16_large, wl16_redrive;
 #define WL17_CLKCHECK 0x040u
 #define WL17_CLKON 0x080u
 #define WL17_ERRDEC 0x100u
-#define WL17_MASK 0x1fcu
+/* BIGMEM：W13 以上直接配置韌體 REQUEST_MEM 要求的大塊（cnss2 與 mainline ath12k 的做法），
+ * 沿用 W13 的二的次方 IOVA 對齊，不做零段協商。預設關閉。 */
+#define WL17_BIGMEM 0x200u
+#define WL17_MASK 0x3fcu
 static unsigned wl17_bits;
 static unsigned wl17_phy17_len;
 static uint64_t wl17_phy17_val;
@@ -1016,15 +1033,17 @@ wl_probe_configure(void)
 			if (!wl17_bits && !bad) {
 				if (variant) { printf("FUXI WLAN: W12 mlo variant %d (1 PHY_CAP, 2 omit MLO) valid %u\n", variant, !wl_variant_invalid); }
 			} else {
-				printf("FUXI WLAN: W12 mlo variant %d (1 PHY_CAP, 2 omit MLO) P17 bits %#x (hostmem %u mloall %u phy17 %u dmaalign %u clkcheck %u clkon %u errdec %u) valid %u\n",
+				printf("FUXI WLAN: W12 mlo variant %d (1 PHY_CAP, 2 omit MLO) P17 bits %#x (hostmem %u mloall %u phy17 %u dmaalign %u clkcheck %u clkon %u errdec %u bigmem %u) valid %u\n",
 				    variant, wl17_bits, !!(wl17_bits & WL17_HOSTMEM), !!(wl17_bits & WL17_MLOALL), !!(wl17_bits & WL17_PHY17),
 				    !!(wl17_bits & WL17_DMAALIGN), !!(wl17_bits & WL17_CLKCHECK), !!(wl17_bits & WL17_CLKON),
-				    !!(wl17_bits & WL17_ERRDEC), !wl_variant_invalid);
+				    !!(wl17_bits & WL17_ERRDEC), !!(wl17_bits & WL17_BIGMEM), !wl_variant_invalid);
 			}
 		}
 	}
 	wl15_variant = 0;
 	wl16_variant = 0; wl16_large = wl16_redrive = false;
+	wl18_enabled = wl18_host_cap = wl18_cap_invalid = false;
+	wl18_omit_nm_modem = false;
 	if (wl_w15) {
 		int variant = 0;
 		(void)PE_parse_boot_argn("fuxiwlanw15", &variant, sizeof(variant));
@@ -1040,6 +1059,26 @@ wl_probe_configure(void)
 		if (variant) {
 			printf("FUXI WLAN: W16 variant %d large-IPCR %u doorbell-redrive %u diagnostics %u valid %u\n",
 			    variant, wl16_large, wl16_redrive, !!wl16_variant, !wl_variant_invalid);
+		}
+		variant = 0;
+		(void)PE_parse_boot_argn("fuxiwlanw18", &variant, sizeof(variant));
+		if (variant < 0 || variant > 1) { wl_variant_invalid = true; }
+		else { wl18_enabled = variant == 1; }
+		if (variant) {
+			printf("FUXI WLAN: W18 timeline %d valid %u\n", variant, !wl_variant_invalid);
+		}
+	}
+	if (wl18_enabled) {
+		char capability[16] = {0};
+		if (PE_parse_boot_arg_str("fuxiwlancap", capability, sizeof(capability))) {
+			if ((capability[0] < '0' || capability[0] > '2') || capability[1]) {
+				wl_variant_invalid = wl18_cap_invalid = true;
+			} else {
+				wl18_host_cap = capability[0] != '0';
+				wl18_omit_nm_modem = capability[0] == '2';
+			}
+			printf("FUXI WLAN: W18 host cap selector %u valid %u (1 SECONDARY=2, 2 also omits nm_modem)\n",
+			    wl18_omit_nm_modem ? 2u : (unsigned)wl18_host_cap, !wl_variant_invalid);
 		}
 	}
 	wl_stop22 = stop22 == 1; wl_keep = keep == 1;
@@ -1084,6 +1123,14 @@ wl_probe_configure(void)
 	    wl_fw_names[wl_fw], wl_pre == 5, !wl_variant_invalid);
 	printf("FUXI WLAN: M6n cnss=%s valid=%u (PDC before step 1)\n",
 	    wl_cnss_names[wl_cnss], !wl_variant_invalid);
+}
+
+static bool
+wl18_cap_refused(void)
+{
+	if (!wl18_cap_invalid) { return false; }
+	printf("FUXI WLAN: invalid fuxiwlancap (expected exact 0, 1 or 2); refused before WLAN power writes\n");
+	return true;
 }
 #define WL_CNSS_IOVA 0xa0000000ull
 #define WL_CNSS_IOVA_END 0xb0000000ull
@@ -2110,7 +2157,7 @@ wl_pt_pa(unsigned table)
 static vm_offset_t
 wl_owned_alias(uint64_t pa, unsigned bytes, bool tables_only)
 {
-	struct wl_dma *bufs[] = { &wl_tables, &wl_image, &wl_vectors, &wl_contexts, &wl_rddm, &wl_rxvectors, &wl_msi_sink, &wl_amss, &wl_ipcr, &wl14_regdb, &wl14_bdf, &wl14_m3 };
+	struct wl_dma *bufs[] = { &wl_tables, &wl_image, &wl_vectors, &wl_contexts, &wl_rddm, &wl_rxvectors, &wl_msi_sink, &wl_amss, &wl_ipcr, &wl14_regdb, &wl14_bdf, &wl14_m3, &wl_ath_arena };
 	unsigned fixed = sizeof(bufs)/sizeof(bufs[0]);
 	for (unsigned i = 0; i < (tables_only ? 1u : fixed + WL_TARGET_MAX); i++) {
 		struct wl_dma *d = i < fixed ? bufs[i] : &wl_target[i-fixed];
@@ -2187,7 +2234,7 @@ wl_smmu_populate(void)
 	for (unsigned i = 0; i < l3_count; i++) {
 		l2[((wl_iova_base >> 21) & 511) + i] = wl_pt_pa(2 + i) | 3;
 	}
-	struct wl_dma *bufs[] = { &wl_image, &wl_vectors, &wl_contexts, &wl_rddm, &wl_rxvectors, &wl_msi_sink, &wl_amss, &wl_ipcr };
+	struct wl_dma *bufs[] = { &wl_image, &wl_vectors, &wl_contexts, &wl_rddm, &wl_rxvectors, &wl_msi_sink, &wl_amss, &wl_ipcr, &wl_ath_arena };
 	for (unsigned i = 0; i < sizeof(bufs)/sizeof(bufs[0]); i++) {
 		struct wl_dma *d = bufs[i];
 		if (d == &wl_image && wl_probe == WL_PROBE_UNMAPPED) { continue; }
@@ -3176,6 +3223,10 @@ static unsigned wl12_num_phy;
 static bool wl13_delayed, wl13_negotiated;
 static bool wl14_ready, wl14_init_done, wl14_board_valid;
 static uint64_t wl15_ready_time;
+static uint64_t wl18_mode_tre;
+static uint32_t wl18_previous[6];
+static unsigned wl18_samples;
+static bool wl18_previous_valid;
 static uint32_t wl14_board;
 static int wl_w12_run(void);
 static int wl_qmi_w12(const uint8_t *, unsigned);
@@ -3205,6 +3256,40 @@ static unsigned wl_ring_next(unsigned i, unsigned n) { return (i + 1) % n; }
 static struct wl_context *wl_channel(unsigned ch) { return (void *)(wl_contexts.va + ch * sizeof(struct wl_context)); }
 static struct wl_tre *wl_ipcr_ring(unsigned off) { return (void *)(wl_ipcr.va + off); }
 static void wl_w11_barrier(void) { __asm__ volatile("dsb sy" ::: "memory"); }
+
+static void
+wl18_snapshot(const char *phase)
+{
+	if (!wl18_enabled || !wl_w15 || !wl14_ready) { return; }
+	const unsigned offsets[] = {wl_bhi+0x28, 0x48, wl_bhi+0x30,
+	    wl_bhi+0x34, wl_bhi+0x38, wl_bhi+0x3c};
+	uint32_t words[6];
+	unsigned faults = fw_faults;
+	bool valid = !faults;
+	for (unsigned index = 0; index < 6; index++) {
+		words[index] = wl_mrd(offsets[index]);
+		valid = valid && words[index] != ~0u;
+	}
+	valid = valid && fw_faults == faults;
+	uint64_t ns = 0;
+	absolutetime_to_nanoseconds(mach_absolute_time() - wl15_ready_time, &ns);
+	unsigned changed = 0;
+	for (unsigned index = 0; index < 6; index++) {
+		if (valid && wl18_previous_valid && words[index] != wl18_previous[index]) {
+			changed |= 1u << index;
+		}
+	}
+	printf("FUXI WLAN: W18 sample %u phase %s elapsed %llu ms txn %u msg %#x reply %u EE %#x MHISTATUS %#x ERRCODE %#x ERRDBG %#x/%#x/%#x valid %u access-faults %u prior-valid %u changed %#x\n",
+	    ++wl18_samples, phase, ns / 1000000ull, wl12_txn, wl12_msg, wl12_reply,
+	    words[0], words[1], words[2], words[3], words[4], words[5], valid,
+	    fw_faults-faults, wl18_previous_valid, changed);
+	wl_w11_barrier();
+	printf("FUXI WLAN: W18 transport TX %u/%u RX %u/%u posted %u MODE-TRE %#llx\n",
+	    wl_tx_read, wl_tx_write, wl_rx_read, wl_rx_write,
+	    (wl_rx_write+WL_IPCR_N-wl_rx_read)%WL_IPCR_N, wl18_mode_tre);
+	if (valid) { memcpy(wl18_previous, words, sizeof(words)); }
+	wl18_previous_valid = valid;
+}
 
 /* RAM-only snapshot: channel RP is diagnostic, never used to reclaim TREs.
  * Completion events remain authoritative. Do not repair a live device-owned
@@ -3567,7 +3652,15 @@ wl_w11_events(void)
 					if (ev.ptr != wl_ipcr.iova+roff+ri*16 || (ch == 20 && ri == wl_tx_write)) { return wl_w11_fail("transfer completion pointer/order"); }
 					struct wl_tre tre = wl_ipcr_ring(roff)[ri];
 					if (bytes > (ch == 20 ? WL_IPCR_TXMTU : WL_IPCR_MTU) || bytes > (tre.d0 & 0xffff)) { return wl_w11_fail("transfer completion length"); }
-					if (ch == 20) { wl_tx_read = wl_ring_next(ri, WL_IPCR_N); }
+					if (ch == 20) {
+						wl_tx_read = wl_ring_next(ri, WL_IPCR_N);
+						if (wl18_enabled && wl12_stage == WL15_MODE && ev.ptr == wl18_mode_tre) {
+							printf("FUXI WLAN: W18 MODE TX EOT ptr %#llx bytes %u event %#x/%#x\n",
+							    ev.ptr, bytes, ev.d0, ev.d1);
+							wl18_snapshot("MODE TX EOT");
+							wl18_mode_tre = 0;
+						}
+					}
 					else {
 						uint64_t lo = wl_ipcr.iova + WL_IPCR_RXBUF;
 						if (tre.ptr < lo || tre.ptr >= lo+WL_IPCR_N*WL_IPCR_MTU ||
@@ -3669,6 +3762,7 @@ wl_w11_run(void)
 	wl12_reply = wl12_requested = wl12_ready = false;
 	wl13_delayed = wl13_negotiated = false;
 	wl14_ready = wl14_init_done = wl14_board_valid = false; wl14_board = 0;
+	wl18_mode_tre = 0; wl18_samples = 0; wl18_previous_valid = false;
 	wl_chdb = wl_mrd(0x18); wl_erdb = wl_mrd(0x20);
 	if (!wl_qrtr || !wl_amss_reached || !wl_contexts_published || wl_w11_guard() ||
 	    (wl_chdb & 7) || wl_chdb < 0x100 || wl_chdb > 0x3c00 ||
@@ -3779,6 +3873,10 @@ wl12_send(struct wl12_encoder *e, unsigned msg, unsigned stage)
 	e->data[0] = 0; wl_put16(e->data+1, wl12_txn);
 	wl_put16(e->data+3, msg); wl_put16(e->data+5, e->len-7);
 	printf("FUXI WLAN: %s send txn %u msg %#x stage %u\n", wl_w15 && stage >= WL15_INI ? "W15" : "W12", wl12_txn, msg, stage);
+	if (wl18_enabled && stage == WL15_MODE) {
+		wl18_mode_tre = wl_ipcr.iova + WL_IPCR_TXR + wl_tx_write*16;
+		wl18_snapshot("MODE before doorbell");
+	}
 	int error = wl_qrtr_send(1, wl_server_node, wl_server_port, e->data, e->len);
 	if (!error && stage == WL15_MODE) { wl16_snapshot("MODE queued"); }
 	return error;
@@ -3840,10 +3938,18 @@ wl12_host_cap(struct wl12_encoder *e)
 {
 	/* ath12k_qmi_host_cap_send: fresh boot cal_done=0, memory mode=0,
 	 * internal clock bits 1/2/3, hw_params CNSS feature bits 3/4. */
-	if (wl12_tlv(e, 0x10, 1, 4) || wl12_tlv(e, 0x13, 0x0e, 1) ||
-	    wl12_tlv(e, 0x14, 1, 1) || wl12_tlv(e, 0x16, 1, 1) ||
+	if (wl12_tlv(e, 0x10, 1, 4)) { return 1; }
+	if (!wl18_omit_nm_modem && wl12_tlv(e, 0x13, 0x0e, 1)) { return 1; }
+	if (wl18_omit_nm_modem) {
+		printf("FUXI WLAN: W18 HOST_CAP TLV 0x13 nm_modem omitted\n");
+	}
+	if (wl12_tlv(e, 0x14, 1, 1) || wl12_tlv(e, 0x16, 1, 1) ||
 	    wl12_tlv(e, 0x17, 1, 1) || wl12_tlv(e, 0x1a, 0, 1) ||
 	    wl12_tlv(e, 0x1c, 0, 1)) { return 1; }
+	if (wl18_host_cap) {
+		if (wl12_tlv(e, 0x20, 2, 4)) { return 1; }
+		printf("FUXI WLAN: W18 HOST_CAP TLV 0x20 host_build_type SECONDARY=2 len=4\n");
+	}
 	int links = wl17_mlo_links(wl12_mlo_variant, wl17_bits, wl12_mlo_enabled, wl12_num_phy);
 	bool mlo = links != 0;
 	if (mlo) {
@@ -4071,7 +4177,8 @@ wl12_request_mem(const uint8_t *v, unsigned n)
 	}
 	if (off != n || wl_iova_next < wl_iova_base || wl_iova_next >= wl_iova_end ||
 	    rounded > wl_iova_end-wl_iova_next) { return wl_w11_fail("REQUEST_MEM trailing bytes/IOVA exhaustion"); }
-	if (wl_w13 && ((wl13_negotiated && large) || (!large && cursor > wl_iova_end))) {
+	if (wl_w13 && ((wl13_negotiated && large) ||
+	    ((!large || (wl17_bits & WL17_BIGMEM)) && cursor > wl_iova_end))) {
 		return wl_w11_fail("REQUEST_MEM small-chunk limit/aligned IOVA exhaustion; negotiation exhausted");
 	}
 	wl_target_n = count; wl_target_total = total; wl12_requested = true;
@@ -4281,6 +4388,7 @@ static void
 wl15_timeout_snapshot(void)
 {
 	if (!wl_w15 || wl12_stage != WL15_MODE) { return; }
+	wl18_snapshot("MODE timeout");
 	wl16_snapshot("MODE timeout");
 	wl15_elapsed("MODE timeout");
 	wl_wlfw_diagnostics("W15 MODE timeout");
@@ -4339,17 +4447,66 @@ wl15_timeout_snapshot(void)
 	printf("FUXI WLAN: W15 pending RX QMI headers %u (snapshot only)\n", pending);
 }
 
+/* P17 ERRDEC: after a WLFW timeout, report whether the firmware ever wrote
+ * the host memory it was granted (allocations start zeroed) and list a few
+ * printable runs. CPU reads of our own wired pages only; nothing is sent. */
+static void
+wl17_target_summary(const char *stage)
+{
+	if (!(wl17_bits & WL17_ERRDEC)) { return; }
+	for (unsigned s = 0; s < wl_target_n && s < WL_TARGET_MAX; s++) {
+		struct wl_dma *d = &wl_target[s];
+		if (!d->va || !wl_target_size[s] || wl_target_size[s] > d->size) { continue; }
+		wl_dma_civac(d);
+		const uint8_t *m = (const uint8_t *)d->va;
+		uint64_t n = wl_target_size[s], nz = 0, first = 0, last = 0, pages = 0;
+		for (uint64_t i = 0; i < n; i += 4096) {
+			uint64_t end = i + 4096 < n ? i + 4096 : n, before = nz;
+			for (uint64_t j = i; j < end; j++) {
+				if (m[j]) { if (!nz) { first = j; } nz++; last = j; }
+			}
+			pages += nz != before;
+		}
+		printf("FUXI WLAN: P17 target %u type %u size %llu after %s: nonzero bytes %llu pages %llu first +%#llx last +%#llx\n",
+		    s, wl_target_type[s], n, stage, nz, pages, first, last);
+		if (!nz) { continue; }
+		printf("FUXI WLAN: P17 target %u head %08x %08x %08x %08x at +%#llx\n", s,
+		    wl_get32(m + (first & ~3ull)), first + 8 <= n ? wl_get32(m + (first & ~3ull) + 4) : 0,
+		    first + 12 <= n ? wl_get32(m + (first & ~3ull) + 8) : 0,
+		    first + 16 <= n ? wl_get32(m + (first & ~3ull) + 12) : 0, first & ~3ull);
+		unsigned shown = 0;
+		for (uint64_t i = 0; i < n && shown < 12;) {
+			if (!wl17_print(m[i])) { i++; continue; }
+			uint64_t j = i;
+			while (j < n && wl17_print(m[j]) && j - i < 96) { j++; }
+			if (j - i >= 20) {
+				char body[97]; unsigned len = (unsigned)(j - i);
+				memcpy(body, m + i, len); body[len] = 0;
+				for (unsigned k = 0; k < len; k++) { if (body[k] == '%') { body[k] = '?'; } }
+				printf("FUXI WLAN: P17 target %u text +%#llx: %s\n", s, i, body);
+				shown++;
+			}
+			i = j;
+		}
+		(void)wl17_scan(m, n, 12, wl17_emit_hit);
+	}
+}
+
 static int
 wl12_wait(unsigned what, const char *stage)
 {
 	/* Match ath12k's ten-second WLFW timeout, with bounded transport passes. */
 	for (unsigned ms = 0; ms <= 10000; ms += 10) {
 		if (wl_w11_events()) {
+			if (wl_w15 && wl12_stage >= WL15_INI) { wl18_snapshot("QMI wait transport failure"); }
 			if (wl12_stage == WL12_RESPOND) { wl13_respond_diagnostics(); }
 			return 1;
 		}
 		if (what == 0 ? wl12_reply : what == 1 ? wl12_requested : what == 2 ? wl12_ready : wl14_ready) { return 0; }
 		if (wl16_variant && wl12_stage == WL15_MODE && ms == 1000) { wl16_snapshot("MODE pending 1000 ms"); }
+		if (wl18_enabled && wl12_stage == WL15_MODE && (ms == 100 || ms == 1000)) {
+			wl18_snapshot(ms == 100 ? "MODE pending 100 ms" : "MODE pending 1000 ms");
+		}
 		if (ms < 10000) { wl_sleep(10); }
 	}
 	if (wl12_mlo_variant == 1 && wl12_msg == 0x57) {
@@ -4359,6 +4516,7 @@ wl12_wait(unsigned what, const char *stage)
 	printf("FUXI WLAN: %s timeout %s (10000 ms); contain, no retry\n", wl_w15 && wl12_stage >= WL15_INI ? "W15" : "W12", stage);
 	if (wl_w15 && wl12_stage == WL15_MODE) { wl15_timeout_snapshot(); }
 	if (wl12_stage == WL12_RESPOND) { wl13_respond_diagnostics(); }
+	wl17_target_summary(stage);
 	return wl_w11_fail(stage);
 }
 
@@ -4494,6 +4652,7 @@ static int
 wl_w15_run(void)
 {
 	static struct wl12_encoder e;
+	wl18_snapshot("FW_READY before INI");
 	bzero(&e, sizeof(e)); e.len = 7;
 	/* qmi_wlanfw_wlan_ini_req_msg_v01 / *_ei: optional 0x10 u8.
 	 * Explicit lane policy: disable fw log (0). Upstream v6.12 sends 1. */
@@ -4501,11 +4660,13 @@ wl_w15_run(void)
 	if (wl12_tlv(&e, 0x10, 0, 1) || wl12_send(&e, 0x2f, WL15_INI) ||
 	    wl12_wait(0, "WLAN_INI reply") || wl_w11_wait(3, "W15 INI TX drain")) { return 1; }
 	printf("FUXI WLAN: W15 wlan ini ok\n");
+	wl18_snapshot("INI reply/TX drained");
 	bzero(&e, sizeof(e)); e.len = 7;
 	printf("FUXI WLAN: W15 wlan cfg host WIN target CE 9 service map 14 shadow v3 %u\n", wl15_variant ? 0 : 36);
 	if (wl15_encode_cfg(&e) || wl12_send(&e, 0x23, WL15_CFG) ||
 	    wl12_wait(0, "WLAN_CFG reply") || wl_w11_wait(3, "W15 CFG TX drain")) { return 1; }
 	printf("FUXI WLAN: W15 wlan cfg ok\n");
+	wl18_snapshot("CFG reply/TX drained");
 	wl16_snapshot("CFG reply/before MODE");
 	if (wl16_redrive) {
 		printf("FUXI WLAN: W16 before MODE re-ring posted RX; no CE init before MODE (ath12k v6.12 order)\n");
@@ -4520,6 +4681,7 @@ wl_w15_run(void)
 	    wl12_send(&e, 0x22, WL15_MODE) || wl12_wait(0, "WLAN_MODE reply") ||
 	    wl_w11_wait(3, "W15 MODE TX drain") || wl_w11_guard()) { return 1; }
 	printf("FUXI WLAN: W15 wlan mode normal ok; stop before CE/HTC\n");
+	wl18_snapshot("MODE reply/TX drained");
 	wl16_snapshot("MODE reply");
 	wl12_stage = WL15_OBSERVE;
 	printf("FUXI WLAN: W15 observing indications 2000 ms (reported only)\n");
@@ -4599,7 +4761,10 @@ wl_w12_run(void)
 	if (wl12_wait(1, "REQUEST_MEM indication")) { return 1; }
 	for (unsigned round = 0; round < 2; round++) {
 		wl13_delayed = false;
-		if (wl_w13 && !wl13_negotiated) {
+		if (wl_w13 && !wl13_negotiated && (wl17_bits & WL17_BIGMEM)) {
+			printf("FUXI WLAN: P17 bigmem grants n=%u total=%llu without zero-segment negotiation; aligned IOVAs\n",
+			    wl_target_n, wl_target_total);
+		} else if (wl_w13 && !wl13_negotiated) {
 			for (unsigned i = 0; i < wl_target_n; i++) {
 				if (wl13_supported(wl_target_type[i]) && wl_target_size[i] > WL13_CHUNK_LIMIT) {
 					wl13_delayed = true;
@@ -5031,6 +5196,8 @@ wl5_abort(unsigned step)
 		for (unsigned i = 0; i < WL_TARGET_MAX; i++) { wl_dma_free(&wl_target[i]); }
 		wl_dma_free(&wl14_regdb); wl_dma_free(&wl14_bdf); wl_dma_free(&wl14_m3);
 		wl_dma_free(&wl_ipcr);
+		wl_dma_free(&wl_ath_arena);
+		wl_ath_release();
 		wl_dma_free(&wl_contexts); wl_dma_free(&wl_vectors); wl_dma_free(&wl_amss); wl_dma_free(&wl_image);
 		printf("FUXI WLAN: abort buffers freed\n");
 	} else {
@@ -5187,9 +5354,12 @@ wl17_clk_step(void)
 	sweet_spmi_bus_unlock();
 }
 
+#include "fuxi_wlan_ath12k.inc"
+
 static void
 fw_run(unsigned limit)
 {
+	if (wl18_cap_refused()) { return; }
 	uint32_t *r4 = wl4_report;
 	r4[0] = WL4_MAGIC;
 	r4[1] = limit;
@@ -5248,6 +5418,12 @@ fw_run(unsigned limit)
 			    s, e, fw_fault_esr, fw_fault_far);
 			goto out;
 		}
+		if (wl_ath_enabled && s == 18) {
+			int native_error = wl_ath_run();
+			printf("FUXI WLAN: ath12k diagnostic result %d; legacy steps 19..28 skipped\n", native_error);
+			wl5_abort(18);
+			goto out;
+		}
 	}
 	printf("FUXI WLAN: %u steps done\n", limit);
 	/* W10 contains successful full runs as well as partial runs. Only explicit
@@ -5270,6 +5446,8 @@ fw_thread(void *arg, wait_result_t result)
 	unsigned mapped = 0;
 	(void)result;
 	for (unsigned i = 0; i < FW_NWIN; i++) {
+		if (wl_ath_enabled && fw_windows[i].pa == 0x60480000) { continue; }
+		if (wl_ath_enabled && fw_windows[i].pa == WL_BAR0) { fw_windows[i].size = 0x200000; }
 		if ((!wl_cnss || wl_variant_invalid) &&
 		    (fw_windows[i].pa == WL_AOSS_QMP || fw_windows[i].pa == WL_AOSS_IPCC)) { continue; }
 		kern_return_t kr = fw_map_window(&fw_windows[i]);
@@ -5304,6 +5482,21 @@ fuxi_wlan_init(void)
 	}
 	unsigned limit = (arg == 1 || arg > (int)WL5_STEPS) ? WL5_STEPS : (unsigned)arg;
 	wl_iova_configure();
+	char native[16] = {0};
+	if (PE_parse_boot_arg_str("fuxiwlanath", native, sizeof(native))) {
+		if (strcmp(native, "0") && strcmp(native, "1")) {
+			printf("FUXI WLAN: invalid fuxiwlanath; refused before WLAN power\n");
+			return;
+		}
+		wl_ath_enabled = !strcmp(native, "1");
+	}
+	if (wl_ath_enabled && (!wla_available() || limit != WL5_STEPS || wl_variant_invalid ||
+	    wl_variant_active() || wl_qrtr || wl_stop22 || wl_keep || wl_probe != WL_PROBE_OFF ||
+	    wl_iova_base != WL_CNSS_IOVA || wl12_mlo_variant ||
+	    wl17_bits != (WL17_CLKCHECK | WL17_CLKON))) {
+		printf("FUXI WLAN: ath12k unavailable or incompatible diagnostic selectors; refused before WLAN power\n");
+		return;
+	}
 	printf("FUXI WLAN: enabled (fuxiwlan=%d), WCN7850 power-up + PCIe0 + MHI firmware, limit %u\n",
 	    arg, limit);
 	if (kernel_thread_start(fw_thread, (void *)(uintptr_t)limit, &thread) == KERN_SUCCESS) {

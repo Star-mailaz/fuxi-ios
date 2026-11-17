@@ -612,7 +612,7 @@ ft_thread(void *arg, wait_result_t result)
 	static const uint8_t id_cmd[] = {0xfb, 0x20, 0x00, 0x00, 0x00}, fifo[] = {0x87};
 	static const uint8_t sense[] = {0xa0, 0x00, 0x01};
 	uint8_t ev[8] = {0}, chip[2] = {0};
-	unsigned delay_s = 30, errors = 0;
+	unsigned delay_s = 10, errors = 0; /* sensing ~41 s on the launchd clock, before the lock screen takes input (was 30) */
 	unsigned poll_us = 4000, idle_us = 8000, offsup = 1;
 	bool irq_seen = false, was_off = false;
 	(void)arg;

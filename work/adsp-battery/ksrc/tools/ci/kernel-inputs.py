@@ -61,6 +61,10 @@ def main():
                     help="LOCAL ONLY: preserve this integration ADT, including root extents")
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
+    ram_layout = os.environ.get('FUXI_RAM_LAYOUT', 'full')
+    if ram_layout != 'full' and args.variant == 'ios27':
+        ap.error('FUXI_RAM_LAYOUT is supported only for xnu-8796')
+    fuxi.configure_ram(ram_layout)
     if args.variant == "ios27":
         if args.local_adt:
             ap.error("--local-adt carries an xnu-8796 ADT; ios27 uses mkadt-fuxi27.py")

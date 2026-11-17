@@ -77,6 +77,7 @@ static unsigned rh_send(unsigned t, unsigned addr, unsigned data);
 static unsigned wl_vrm(unsigned addr, unsigned mv) { return rh_send(0,addr,mv) || rh_send(0,addr+4,1); }
 static unsigned rh_send(unsigned t, unsigned addr, unsigned data) { return 0; }
 static unsigned wl_icc_acks;
+static void wl_ath_release(void) { }
 struct reg { uint64_t pa; uint32_t v; };
 struct ev { char kind; uint64_t pa; uint32_t v; };
 static struct reg regs[4096];
@@ -100,6 +101,7 @@ static bool PE_parse_boot_argn(const char *name, void *out, int size) {
     if(!strcmp(name,"fuxiwlanmlo")) { if(mlo_present)memcpy(out,&mlo_arg,size); return mlo_present; }
     if(!strcmp(name,"fuxiwlanw15")) { assert(size==sizeof(int)); return false; }
     if(!strcmp(name,"fuxiwlanw16")) { assert(size==sizeof(int)); return false; }
+    if(!strcmp(name,"fuxiwlanw18")) { assert(size==sizeof(int)); return false; }
     if(!strcmp(name,"fuxiwlanprobe")) {
         if(probe_arg) { strncpy(out,probe_arg,size); return true; }
         return false;
@@ -1035,12 +1037,14 @@ int main(void) {
 def main():
     driver = (ROOT / 'xnu/fuxi-wlan/fuxi_wlan.c').read_text()
     patch = (ROOT / 'xnu/patches/0099-fuxi-wlan.patch').read_text()
-    added = patch.split('+++ b/bsd/dev/fuxi_wlan.c\n', 1)[1].split('\n--- a/', 1)[0]
+    added = re.split(r'\n--- (?:a/|/dev/null\n)',
+                     patch.split('+++ b/bsd/dev/fuxi_wlan.c\n', 1)[1], maxsplit=1)[0]
     count = re.match(r'@@ -0,0 \+1,(\d+) @@\n', added)
     assert count and int(count[1]) == len(driver.splitlines()), 'WLAN new-file hunk count differs'
     reconstructed = '\n'.join(line[1:] for line in added.splitlines() if line.startswith('+')) + '\n'
     assert reconstructed == driver, 'integration patch and standalone WLAN C differ'
-    included = patch.split('+++ b/bsd/dev/wlan.c\n', 1)[1]
+    included = re.split(r'\n--- (?:a/|/dev/null\n)',
+                        patch.split('+++ b/bsd/dev/wlan.c\n', 1)[1], maxsplit=1)[0]
     reconstructed = '\n'.join(line[1:] for line in included.splitlines() if line.startswith('+')) + '\n'
     assert reconstructed == (ROOT / 'shim/fuxi-probe/wlan.c').read_text(), 'included M3 source differs'
     block = driver.split('/* ---- milestone 5:', 1)[1].split('static void\nfw_dump(', 1)[0]

@@ -1,0 +1,60 @@
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -269,7 +269,8 @@
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ extern void sweet_log_append(const char *c, int size);  /* bsd/dev/sweet_ufs.c */
+ /*
+- * Set by AppleCLCD (boot-arg sweetfb_noconsole=1) once the GUI presents:
++ * Set by AppleCLCD (boot-arg sweetfb_noconsole=1) once the GUI presents,
++ * or by vcattach from the start (sweetfb_noconsole=2, patch 0119):
+  * console text still goes to the persistent log, but is not drawn over
+  * the GUI. A panic draws again.
+  */
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -110,6 +110,10 @@
+ 
+ #include "sys/msgbuf.h"
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++extern int sweet_console_muted;         /* osfmk/console/serial_console.c (0067) */
++#endif
++
+ /*
+  * Generic Console (Front-End)
+  * ---------------------------
+@@ -3052,6 +3056,22 @@
+ {
+ 	vm_initialized = TRUE;
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/*
++	 * FUXI (0119): boot-arg sweetfb_noconsole=2 keeps the text console off the
++	 * screen from here on (sweetfb_noconsole=1 does it from the GUI's first
++	 * frame): no replay of the early log, no boot text. Everything still goes
++	 * to the persistent log; a panic draws.
++	 */
++	{
++		int quiet = 0;
++		if (PE_parse_boot_argn("sweetfb_noconsole", &quiet, sizeof(quiet)) && quiet == 2) {
++			sweet_console_muted = 1;
++			printf("FUXI QUIET BOOT: console text kept off the screen from vcattach (sweetfb_noconsole=2)\n");
++		}
++	}
++#endif
++
+ #if defined(CONFIG_VC_PROGRESS_METER_SUPPORT)
+ 	const boot_args * bootargs  = (typeof(bootargs))PE_state.bootArgs;
+ 
+@@ -3083,6 +3103,11 @@
+ 
+ 		initialize_screen(NULL, kPEAcquireScreen);
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		if (sweet_console_muted) {
++			return;
++		}
++#endif
+ 		for (index = 0; index < msgbufp->msg_bufx; index++) {
+ 			if (msgbufp->msg_bufc[index] == '\0') {
+ 				continue;

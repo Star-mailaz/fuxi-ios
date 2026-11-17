@@ -32,7 +32,8 @@
  * The panel memory itself is published as an IOSurface and returned as the
  * default framebuffer surface. The kernel text console keeps drawing over
  * the GUI by default: boot-arg sweetfb_noconsole=1 stops drawing it from
- * the first swap on (it still reaches the persistent log; panics draw).
+ * the first swap on (it still reaches the persistent log; panics draw);
+ * sweetfb_noconsole=2 (patch 0119) keeps it off the screen from vcattach.
  *
  * FUXI (0093): frames are shown at up to 60 Hz by default (7 fast cores;
  * sweetfb_hz still overrides), the tick runs on absolute deadlines so the
@@ -653,10 +654,10 @@ AppleCLCD::start(IOService *provider)
  PE_parse_boot_argn("fuxigpuscanoutlog", &log, sizeof(log));
  int quiet = 0;
  PE_parse_boot_argn("sweetfb_noconsole", &quiet, sizeof(quiet));
- fScanout = scanout == 1 && quiet == 1;
+ fScanout = scanout == 1 && (quiet == 1 || quiet == 2);
  fScanoutLog = log == 1 ? 2 : fScanout ? 1 : 0;
  if (scanout == 1 && !fScanout)
-  IOLog("FUXI SCANOUT: unavailable, requires sweetfb_noconsole=1; existing present path\n");
+  IOLog("FUXI SCANOUT: unavailable, requires sweetfb_noconsole=1 or 2; existing present path\n");
  if (fScanout) { sweet_console_muted = 1; fConsolePaused = true; }
  fuxi_gpu_scanout_configure(fPixels, fScanout, check);
  uint32_t nc = 0;

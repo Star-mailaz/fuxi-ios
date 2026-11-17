@@ -1,14 +1,21 @@
 # P-WIFI: iOS Wi-Fi interface shim
 
-Source-only, opt-in bring-up. Patch **0104-fuxi-wifi-ios.patch** publishes a
-synthetic Wi-Fi `en0` to iOS 16.7 on Fuxi. The WCN7850 driver in patch 0099 is
-unchanged: QMI setup does not yet provide Ethernet TX/RX, association, scanning
-or key installation. This lane performs **no radio, PCIe, firmware or DMA access**.
-Host tests and local arm64 syntax checks pass; no device result is claimed.
+Opt-in bring-up. Patch **0104-fuxi-wifi-ios.patch** publishes a Wi-Fi `en0`
+to iOS 16.7 on Fuxi through a boot-lifetime backend. Its original synthetic
+fixture remains mode 1. Mode 2 waits for the WCN7850 native backend from
+patch 0099; that driver has completed a real 34-BSS diagnostic scan. The
+station bridge connects real power, scanning and (since 2026-11-17) joining:
+open and WPA2-Personal (CCMP) networks, the four-way and group handshakes,
+keys, port and Ethernet frames both ways. The join is host-tested only;
+device validation is pending. WPA3/SAE and networks that require MFP are
+refused with `EOPNOTSUPP`.
 
 ## Enablement and backend boundary
 
-`fuxiwifiios=1` enables the shim. Missing, zero or other values do nothing:
+`fuxiwifiios=1` enables the synthetic shim. `fuxiwifiios=2` waits for the
+native backend and never attaches the fake backend. It requires the linked
+ath12k variant, `fuxiwlan=1 fuxiwlanath=1 fuxiwlanmlo=192`, and native
+firmware assets. Missing, zero or other values do nothing:
 no interface, station thread or discovery services are created. Preserve all
 other caller boot arguments. No `fuxiwlan` argument is required for the fake
 backend. The existing USB Ethernet interface is `ue0`; it is not renamed.
@@ -32,15 +39,43 @@ events. The backend changes the BSD carrier with `link_state`; unrequested
 loss also calls `fuxi_wifi_sta_lost(errno)` after updating its state snapshot.
 The shim bounds cached SSIDs, information elements and channel counts.
 
-For a future `fuxi_wlan` adapter, select its backend instead of `fake_backend`
-at the init call, after firmware/data-path readiness. Supply Ethernet
-encapsulation/decapsulation and a bounded worker for real RX. The ported
-`fuxi_wifi_wpa.h` offers PMK derivation, four-way/group EAPOL processing and
-key outputs. The adapter must generate fresh nonces, own EAPOL routing and
-retransmission/timeouts, program pairwise/group firmware keys, and assert
-carrier only after successful installation. Nothing binds QMI success to a
-usable link today. The crypto library is compiled and tested but is not used
-by the open synthetic BSS.
+The native `fuxi_wlan` adapter publishes after INFO and GET_CHANNELS have
+succeeded, and leaves Ethernet carrier down until a join completes. It supports
+applied radio power, active/passive scans, one directed SSID and up to 64
+frequencies. Nonzero dwell requests currently return unsupported because the
+pinned control ABI cannot express them. A single wireless worker executes all
+module calls; station callers hand it one operation at a time.
+
+Scan results come from GET_BSS, one access point per request, with every
+element the radio heard (the module's own `nw_bss_info` records stop at 384
+bytes, mid-element, which hid RSN from wifid). Elements are copied whole, in
+order, up to 1024 bytes: SSID, rates, DS, TIM, country, BSS load, HT/VHT/HE,
+RSN, extended capabilities and the WPA/WMM vendor elements are kept first and
+the rest while room remains. A failing GET_BSS falls back to the module
+records. The first two scans log one line per access point (frequency, RSSI,
+element sizes, RSN suites, printable SSID) and never a key.
+
+`join` picks the named network (or BSSID) heard best, scanning for it first if
+it was not heard in the last 20 s. It checks the RSN element: WPA2-Personal
+needs AKM 00-0F-AC:2, pairwise CCMP and a CCMP or TKIP group cipher; MFP
+required is refused, MFP capable joins without it. The worker then runs
+AUTHENTICATE (open system), ASSOCIATE with its own RSN element, the four-way
+handshake through `fuxi_wifi_wpa.c` over RX_EAPOL/TX_EAPOL (fresh
+`read_random` nonce), SET_KEY pairwise and group, SET_PORT and SET_OPERSTATE,
+and only then raises carrier. Received frames arrive through the module's
+`rx` event callback; `nw_wifi_tx` sends. Errors: authentication or
+association refused `ECONNREFUSED`, no answer `ETIMEDOUT`, the access point
+leaving or going silent after message 2 `EAUTH` (wrong passphrase), a module
+refusal its own status. Every failure sends DEAUTHENTICATE unless the access
+point already left; the 20 s join budget sits inside the 30 s operation
+limit. Group rekeys are answered and installed while joined; loss lowers
+carrier and calls `fuxi_wifi_sta_lost(ECONNRESET)`. The PMK is wiped when the
+link comes up, request buffers after each send.
+
+`fuxiwifitest=2 fuxiwifitestssid=<name>` joins that network once with a
+made-up passphrase 15 s after publication: authentication, association and
+message 1 → 2 prove the path, and `EAUTH` (key refused) is the expected
+result. Real passphrases never appear in boot arguments or logs.
 
 The fake backend reports **Fuxi Loopback**, an open BSS on channel 1, RSSI
 −42 dBm. It honors SSID/channel scan filters, accepts only that BSS, rejects
@@ -231,6 +266,26 @@ DHCP emulation, Mesa, metal2vulkan and NativeMetal. They are unnecessary for
 this iOS shim or belong to later hardware/userland work. WPA arithmetic alone
 does not supply retransmissions or a working radio supplicant.
 
+## Opt-in CoreWiFi scan audit (2026-11-17)
+
+The existing HackiOS-derived exec injection helper also accepts bit 8 for the exact
+`/usr/sbin/wifid` executable. All previous masks retain their behavior; without bit 8
+the daemon receives no library. The shared `libfuxi-sb.dylib` contains `FuxiWifiAudit.c`,
+which checks Objective-C signatures before observing the original
+`CWFScanResult initWithScanRecord:includeProperties:` result and
+`CWFScanParameters includeScanResults` getter. It reports at most 96 conversions
+and 24 filter queries: creation success, an SSID identifier, age, RSSI, AP mode,
+ESS status, maximum age, minimum RSSI, BSS type and include-list presence/count.
+It never changes scan parameters or results and never formats a dictionary,
+password, keychain entry or key material.
+
+This reuses the workspace injection/diagnostic approach and the owning 20H392
+IO80211/CoreWiFi framework behavior. On the latest captured boot, native scans
+finish and IO80211 delivers 35/40/48 networks, but autojoin still has no candidate;
+the previous missing-password errors are absent. Runtime conversion/filter
+observations are needed before attributing the remaining failure to a specific
+filter or driver field.
+
 ## Host validation
 
 ```sh
@@ -261,3 +316,29 @@ through 0104 were applied on the available local base; already present
 hunk counts and application of every generated source/integration hunk.
 Existing `tools/test-fuxi-h1.py` and `tools/test-fuxi-wlan-w14.py` also pass.
 No phone tools, CI/workflow, push or firmware/blob copy was used.
+
+## Native scan extensions (2026-11-17)
+
+The native ath12k bridge has two independent experimental boot arguments,
+both off by default. `fuxiwlandwell=1` accepts explicit scan dwell only when
+the module advertises feature bit 31 in INFO. Attribute 46 carries requested
+milliseconds, bounded to 1–1000. The module converts to cfg80211 TU with
+rounding up; ath12k converts TU to WMI milliseconds and fills all five band
+dwell fields, burst duration and mandatory static dwell. A 110 ms request
+becomes 108 TU and 111 WMI ms. Requests whose channel count and rest allowance
+exceed the 19-second budget are refused. Zero dwell preserves upstream defaults.
+
+`fuxiwlancache=1` allows Apple80211 FAST scans (type 3) to reuse a successful
+completed scan for at most five seconds. The prior scan must cover the requested
+SSID, channel list, passive mode and dwell. A failed, incomplete, powered-off
+or truncated module fallback scan cannot supply this cache; reported BSS ages
+continue advancing. Other scan types still ask the radio.
+
+The module input is CI run `44002779624`, harness `9b5cfcd`; the object, source
+lock, patch provenance, imports, platform and changed production source hashes
+are checked by `tools/ci/ath12k-link.py`. Host ASan/UBSan exercises the production
+control scan and ath12k dwell conversion for every integer millisecond from
+1 through 1000, malformed attributes, timeout budgets and unchanged defaults.
+The bridge suite covers feature negotiation, opt-in gates, cache coverage,
+expiry, power invalidation and real scan completion before success. These
+checks do not establish automatic joining or internet access on hardware.
