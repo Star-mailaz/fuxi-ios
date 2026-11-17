@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.DS_Store
+# 工具執行時寫的紀錄
+/work/dualboot/
