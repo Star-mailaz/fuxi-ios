@@ -41,7 +41,7 @@ reserved = True  # Both supported windows exclude top-of-bank scratch.
 pinned = {
  "gpu": "1a2a419c39046d3141fc5fed5aa7f971de2db40cc7a1d89693c3e26fad64dd98",
  "sqe": "6d38046654333a6a5a4ee77ab67abc24e3c0c5c68237513afe98e94da8fc9fcc",
- "zap": "86e4c3f61d4ddbe581405f4cc496182cf385bee39aaefec61639a31d3619fd35",
+ "zap": ("86e4c3f61d4ddbe581405f4cc496182cf385bee39aaefec61639a31d3619fd35", "2015e9bb81b1f6efed11fdab0a5884b3f308ca41d50f4315e3ed2e36ee5e57f1"),
 }
 lines = ['.section .gpu_fw,"a"']
 for src, name in ((gmu, 'gpu'), (sqe, 'sqe'), (zap, 'zap')):
@@ -51,7 +51,8 @@ for src, name in ((gmu, 'gpu'), (sqe, 'sqe'), (zap, 'zap')):
         size = path.stat().st_size
         assert path.is_file() and 4 < size <= 0x100000 and size % 4 == 0, 'invalid firmware size'
         if reserved:
-            assert hashlib.sha256(path.read_bytes()).hexdigest() == pinned[name], 'M6 requires the device-verified firmware'
+            h = hashlib.sha256(path.read_bytes()).hexdigest()
+            assert (h == pinned[name] if isinstance(pinned[name], str) else h in pinned[name]), 'M6 requires the device-verified firmware'
         if name == 'sqe':
             assert size - 4 <= 0x20000, 'SQE exceeds reserved buffer'
         if name == 'zap':
@@ -63,7 +64,7 @@ FWPY
 # incbin avoids C absolute pointers in an Image loaded at an arbitrary PA.
 printf '.section .payload,"a"\n.incbin "%s"\n' "$payload" > "$out/payload.S"
 flags=(--target=aarch64-none-elf -O2 -ffreestanding -fno-builtin -nostdlib
-       -fno-pic -fno-stack-protector -mgeneral-regs-only -mstrict-align -Wall -Wextra -Werror -DFUXI=1 -DFUXI_XNU_LOADER=1 -I..)
+       -fno-pic -fno-stack-protector -mgeneral-regs-only -mstrict-align -Wall -Wextra -Werror -Wno-error=unterminated-string-initialization -DFUXI=1 -DFUXI_XNU_LOADER=1 -I..)
 for source in start.S loader.c ../console.c ../fuxi-probe/probe.c; do
  name=$(basename "${source%.*}")
  "$CLANG" "${flags[@]}" -c "$source" -o "$out/$name.o"

@@ -49,7 +49,13 @@ def validate_live(path, ufs_readonly=False):
     if len(memory) % 16:
         raise ValueError('unexpected /memory cell layout')
     ranges = list(struct.iter_unpack('>QQ', memory))
-    if not any(base <= PHYS_BASE and PHYS_BASE + BANK_SIZE <= base + size for base, size in ranges):
+    merged = []
+    for b, s in sorted(ranges):
+        if merged and merged[-1][0] + merged[-1][1] == b:
+            merged[-1] = (merged[-1][0], merged[-1][1] + s)
+        else:
+            merged.append((b, s))
+    if not any(base <= PHYS_BASE and PHYS_BASE + BANK_SIZE <= base + size for base, size in merged):
         raise ValueError('requested XNU RAM is outside advertised memory')
     inventory = fdt.describe(nodes, reservations)['nodes']
     for name, props in inventory.items():

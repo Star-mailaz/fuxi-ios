@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include "../font.h"
 #include "monitor.h"
+#include "gpu-handoff.h"
 #define printf(...) ((void)0)
 #define rsr(r) ({ uint64_t v; __asm__ volatile("mrs %0, " r : "=r"(v)); v; })
 static void *memset(void *dst, int c, size_t n)
@@ -1121,6 +1122,24 @@ ud_string(unsigned idx, uint8_t *out)
 	return n;
 }
 
+#if defined(FUXI_XNU_LOADER) && defined(FUXI_AUTO_LAUNCH_S)
+/*
+ * Standalone launch (no PC monitor; loader flashed to recovery_a and entered with
+ * `reboot recovery`). Any vendor-class request marks a host. With none for
+ * FUXI_AUTO_LAUNCH_S seconds after USB start, probe_main does what
+ * tools/fuxi-xnu-monitor.py does before the handoff: CPU_ON cpu@100, move USB
+ * polling there, monitor idle mode 2 (WFE), touch power stage 9, launch.
+ * Plain enumeration by a PC or a charger sends only standard requests.
+ * The reset deadline is cleared (a host can still set one with 0x54); the way back
+ * to Android is the PMIC's own S2 reset: KPDPWR ~12 s (hard), KPDPWR+RESIN ~6.5 s
+ * (warm) (PMK8550 pon_pbs 0x840-0x84b as XBL leaves them, read under Android).
+ */
+static volatile uint32_t auto_host_seen, auto_state;
+#define AUTO_BUSY() (auto_state != 0)
+#else
+#define AUTO_BUSY() 0
+#endif
+
 static void
 ud_setup(void)
 {
@@ -1132,6 +1151,10 @@ ud_setup(void)
 	uint32_t n = 0;
 	bool ok = true;
 
+#if defined(FUXI_XNU_LOADER) && defined(FUXI_AUTO_LAUNCH_S)
+	if ((type & 0x60) == 0x40)
+		auto_host_seen = 1;
+#endif
 	if (req != 0x5b || value == 0)  /* audio staging sends ~10^5 chunks: log the first only */
 		printf("SWEET USB: setup %02x %02x %04x len %u\n", type, req, value, length);
 	ud.data_in = (type & 0x80) != 0;
@@ -1163,12 +1186,13 @@ ud_setup(void)
             monitor_report[MON_DELEGATE]=1;
         monitor_report[MON_USB_MPIDR]=rsr("mpidr_el1");
         memcpy(data, (const void *)monitor_report, sizeof(monitor_report)); n=sizeof(monitor_report);
-    } else if (type == 0xc0 && (req == 0x47 || req == 0x58)) {
+    } else if (type == 0xc0 && (req == 0x47 || req == 0x58 || req == 0x59)) {
         uint32_t index=(uint32_t)st[4] | ((uint32_t)st[5]<<8);
         uint64_t off=(uint64_t)value | ((uint64_t)index<<16);
         if (req == 0x58) off += 0x100000000ULL; /* upper 4 GiB bank */
+        if (req == 0x59) off += 0x200000000ULL;
         n=length > 512 ? 512 : length;
-        if (off > 0x13e000000ULL || n > 0x13e000000ULL-off) ok=false;
+        if (off > FG_RAM_SIZE || n > FG_RAM_SIZE-off) ok=false;
         else memcpy(data, (const void *)(uintptr_t)(0x8c0000000ULL+off), n);
     } else if (type == 0xc0 && req == 0x4e) {
         uint32_t index=(uint32_t)st[4] | ((uint32_t)st[5]<<8);
@@ -1212,7 +1236,7 @@ ud_setup(void)
     } else if (type == 0xc0 && req == 0x53 && !monitor_report[MON_LAUNCH]) {
         ar_test(value);
         memcpy(data, ar_report, sizeof(ar_report)); n=sizeof(ar_report);
-    } else if (type == 0xc0 && req == 0x55 && !monitor_report[MON_LAUNCH] &&
+    } else if (type == 0xc0 && req == 0x55 && !monitor_report[MON_LAUNCH] && !AUTO_BUSY() &&
                (value == 0x5453 || value == 0x5450 || value == 0x5445)) {
         if (value == 0x5445) {
             n=touch_read_events();
@@ -1464,6 +1488,48 @@ static __attribute__((noreturn)) void reboot(void)
  __asm__ volatile("dsb sy; smc #0" : "+r"(fn) :: "x1","x2","x3","x4","x5","x6","x7","x8","x9","x10","x11","x12","x13","x14","x15","x16","x17","memory");
  for(;;) __asm__ volatile("wfe");
 }
+#if defined(FUXI_XNU_LOADER) && defined(FUXI_AUTO_LAUNCH_S)
+/* Readable over USB afterwards with request 0x48 (only shown by the PC monitor at stage 99). */
+static void auto_note(const char *text, uint32_t v)
+{
+ static const char hex[]="0123456789abcdef";
+ unsigned i=0;
+ for (;text[i] && i<sizeof(monitor_error)-12;i++) monitor_error[i]=text[i];
+ for (int s=28;s>=0;s-=4) monitor_error[i++]=hex[(v>>s)&15];
+ monitor_error[i]=0;
+ __asm__ volatile("dsb sy" ::: "memory");
+}
+/* One step per probe_main loop pass; true = launch now (the caller returns). */
+static bool auto_launch_step(uint64_t at)
+{
+ if (auto_state == 0) {
+  if (auto_host_seen || rsr("cntpct_el0") < at) return false;
+  auto_state = 1;
+  __asm__ volatile("dsb sy" ::: "memory");
+  core_probe();
+  if (core_report[2] || !core_report[3] || monitor_report[MON_DELEGATE]) {
+   /* cpu@100 did not start (or a host got there first): no launch, 90 s deadline reboots */
+   auto_state = 0x80000001u;
+   auto_note("auto: cpu@100 start failed psci ", (uint32_t)core_report[2]);
+   return false;
+  }
+  auto_note("auto: delegating usb ", 0);
+  monitor_report[MON_DELEGATE] = 1;  /* the loop above hands USB to cpu@100 at EP0_SETUP */
+  return false;
+ }
+ if (auto_state != 1 || !monitor_report[MON_ACTIVE]) return false;
+ auto_state = 2;
+ th_idle_mode = 2;
+ __asm__ volatile("dsb sy" ::: "memory");
+ touch_power(9);
+ auto_note("auto: launched, touch power ", touch_report[0]);
+ monitor_report[MON_DEADLINE] = 0;
+ __asm__ volatile("dsb sy" ::: "memory");
+ monitor_report[MON_LAUNCH] = 1;
+ __asm__ volatile("dsb sy" ::: "memory");
+ return true;
+}
+#endif
 void probe_main(uintptr_t fdt)
 {
  extern char _head[], _end[];
@@ -1494,6 +1560,10 @@ void probe_main(uintptr_t fdt)
  probe_info.dsts_before=usb_rd(0xa600000,DSTS);
  usb_start(0xa600000);
  monitor_report[MON_STAGE]=1;
+#if defined(FUXI_XNU_LOADER) && defined(FUXI_AUTO_LAUNCH_S)
+ _Static_assert(FUXI_AUTO_LAUNCH_S >= 5 && FUXI_AUTO_LAUNCH_S <= 60, "auto launch delay");
+ const uint64_t auto_at=rsr("cntpct_el0")+rsr("cntfrq_el0")*FUXI_AUTO_LAUNCH_S;
+#endif
  while(rsr("cntpct_el0")<monitor_report[MON_DEADLINE]) {
   if (!monitor_report[MON_ACTIVE] && monitor_report[MON_DELEGATE]!=2) {
    usb_poll();
@@ -1504,6 +1574,9 @@ void probe_main(uintptr_t fdt)
   }
 #if defined(FUXI_XNU_LOADER)
   if (monitor_report[MON_ACTIVE] && monitor_report[MON_LAUNCH]) return;
+#if defined(FUXI_AUTO_LAUNCH_S)
+  if (auto_launch_step(auto_at)) return;
+#endif
 #endif
  }
 

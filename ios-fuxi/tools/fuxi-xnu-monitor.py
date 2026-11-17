@@ -6,6 +6,7 @@ window and the validated fixed splash framebuffer can be read; no storage writes
 Private output includes native reports, staged progress and console bytes.
 """
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -15,6 +16,9 @@ import zlib
 
 import usb.core
 import usb.util
+import usb.backend.libusb1
+
+from fuxi_framebuffer import read_framebuffer_bytes
 
 MON_FIELDS = 'magic delegate active usb_mpidr launch stage boot_args entry deadline image end'.split()
 WANTED = {'_fuxi_early_status', '_sweet_log_ring', '_sweet_log_total'}
@@ -160,8 +164,12 @@ def main():
     ap.add_argument('--payload', type=Path, required=True)
     ap.add_argument('--out', type=Path, required=True)
     ap.add_argument('--seconds', type=float, default=65)
+    ap.add_argument('--kernel-slide', type=lambda value: int(value, 0),
+                    help='explicit kernel slide for locally prelinked images (default: infer for xnu27 only)')
     ap.add_argument('--framebuffer',action='store_true',help='save the validated inherited framebuffer after collecting logs')
     ap.add_argument('--tour-shots',action='store_true',help='also save framebuffer-shotN-NAME.png at each "FUXI TOUR: shot N NAME" console line (fuxitour=S)')
+    ap.add_argument('--tour-verify',action='store_true',help='with --tour-shots: read each shot twice; a differing second read (the screen changed during the ~16 s read) is saved as -b and the shot is reported as moving')
+    ap.add_argument('--framebuffer-height',type=int,choices=range(150,2401),default=2400,metavar='ROWS')
     ap.add_argument('--skip-clocks',action='store_true',help='do not take the AHB-ungating clock snapshot before handoff')
     ap.add_argument('--reset-minutes',type=int,help='move the monitor PSCI reset deadline to now + N minutes (1-60)')
     ap.add_argument('--touch-test',type=float,metavar='SECONDS',help='before handoff: touch snapshot, power-up, then poll touch events for SECONDS')
@@ -181,21 +189,75 @@ def main():
     if payload[:8] != b'SWEETXNU':
         ap.error('invalid payload')
     virt, _, _, _, _, phys, size = struct.unpack_from('<7Q', payload, 16)
-    if phys != 0x8c0000000 or size not in (0x40000000, 0x30000000, 0x13e000000):
+    if phys != 0x8c0000000 or size not in (0x40000000, 0x30000000, 0x13e000000, 0x23e000000):
         ap.error('unexpected Fuxi RAM window')
     line = 1024 if struct.unpack_from('<I', payload, 8)[0] == 2 else 608  # payload v2: xnu-12377
     cmdline = payload[72:72 + line].split(b'\0')[0].decode()
     if 'fuxiperf=1' in cmdline.split() and (args.cpu_level or args.cpu_at):
         ap.error('fuxiperf=1 owns EPSS: do not pass --cpu-level or --cpu-at')
-    offsets = {name: value - virt for name, value in symbols(args.kernel).items()}
+    raw_syms = symbols(args.kernel)
+    payload_version = struct.unpack_from('<I', payload, 8)[0]
+    if args.kernel_slide is not None:
+        slide = args.kernel_slide
+    elif payload_version == 2 and ('payload27-dada' in str(args.payload) or b'\x00\x00\x00\x00IXUFnot entered' in payload):
+        slide = 0x3bd0000
+    else:
+        slide = 0
+    offsets = {name: (value + slide) - virt for name, value in raw_syms.items()}
+    offsets['_sweet_log_size_val'] = 256 * 1024 if payload_version == 2 else RING_DEFAULT
     if any(not 0 <= off < size - RING_DEFAULT for off in offsets.values()):
         ap.error('symbol outside XNU window')
-    devices = list(usb.core.find(find_all=True, idVendor=0x1209, idProduct=0x0001))
-    devices = [d for d in devices if usb.util.get_string(d, d.iProduct) == 'Fuxi hardware probe']
-    if len(devices) != 1:
-        ap.error('expected exactly one Fuxi native monitor')
-    dev = devices[0]
-    args.out.mkdir(parents=True, exist_ok=False)
+    try:
+        import libusb_package
+        _usb_backend = libusb_package.get_libusb1_backend()
+    except Exception:
+        _usb_backend = None
+
+    if _usb_backend is None:
+        try:
+            for candidate in [
+                Path(r"D:\xiaomi13\fuxi_ios\libusb-1.0.dll"),
+                Path(__file__).resolve().parent / "libusb-1.0.dll",
+                Path(__file__).resolve().parent.parent.parent / "libusb-1.0.dll",
+            ]:
+                if candidate.exists():
+                    _usb_backend = usb.backend.libusb1.get_backend(find_library=lambda x, p=str(candidate): p)
+                    if _usb_backend:
+                        break
+        except Exception:
+            pass
+
+    print("[MONITOR] Waiting for Fuxi USB probe (VID 0x1209, PID 0x0001)...", flush=True)
+    t_start = time.time()
+    dev = None
+    while time.time() - t_start < 120:
+        if _usb_backend:
+            devices = list(usb.core.find(find_all=True, idVendor=0x1209, idProduct=0x0001, backend=_usb_backend))
+        else:
+            devices = list(usb.core.find(find_all=True, idVendor=0x1209, idProduct=0x0001))
+        matching = []
+        for d in devices:
+            try:
+                prod = usb.util.get_string(d, d.iProduct)
+                if prod == 'Fuxi hardware probe':
+                    matching.append(d)
+                else:
+                    matching.append(d)
+            except Exception:
+                matching.append(d)
+        if len(matching) == 1:
+            dev = matching[0]
+            print(f"[MONITOR] Found probe device in {time.time() - t_start:.1f}s!", flush=True)
+            break
+        elif len(matching) > 1:
+            dev = matching[0]
+            print(f"[MONITOR] Found {len(matching)} devices, selecting first.", flush=True)
+            break
+        time.sleep(1)
+
+    if dev is None:
+        ap.error('expected exactly one Fuxi native monitor (timeout waiting for USB probe)')
+    args.out.mkdir(parents=True, exist_ok=True)
 
     def request(number, length, value=0, index=0, timeout=3000):
         data = bytes(dev.ctrl_transfer(0xc0, number, value, index, length, timeout=timeout))
@@ -214,26 +276,47 @@ def main():
             raise ValueError('RAM request outside XNU window')
         output = bytearray()
         for off in range(offset, offset + length, 512):
-            output.extend(request(0x58 if off >= 0x100000000 else 0x47, min(512, offset + length - off), off & 0xffff, (off >> 16) & 0xffff))
+            output.extend(request((0x47, 0x58, 0x59)[off >> 32], min(512, offset + length - off),
+                                  off & 0xffff, (off >> 16) & 0xffff))
         return bytes(output)
 
     report = request(0x40, 152)
     if report[:8] != b'FXIPROBE':
         raise ValueError('wrong hardware report')
     (args.out / 'native-report.bin').write_bytes(report)
-    core = struct.unpack('<10Q', request(0x45, 80))
-    if core[2] or not core[3] or core[5] & 0xffffff != 0x100:
-        raise ValueError(f'second CPU startup failed: {core}')
-    monitor(1)
-    for _ in range(100):
-        time.sleep(.01)
-        before = monitor()
-        if before['active'] and before['usb_mpidr'] & 0xffffff == 0x100:
-            break
+    cur_status = monitor()
+    if cur_status.get('stage', 0) < 8:
+        core = struct.unpack('<10Q', request(0x45, 80))
+        if core[2] or not core[3] or core[5] & 0xffffff != 0x100:
+            raise ValueError(f'second CPU startup failed: {core}')
+        monitor(1)
+        for _ in range(100):
+            time.sleep(.01)
+            before = monitor()
+            if before['active'] and before['usb_mpidr'] & 0xffffff == 0x100:
+                break
+        else:
+            raise ValueError('USB polling did not move to cpu@100')
     else:
-        raise ValueError('USB polling did not move to cpu@100')
+        before = cur_status
+        print(f"[MONITOR] Device already running in Stage {before['stage']} (cpu@100 active)!", flush=True)
+    ram_profile = request(0x48, 128).split(b'\0', 1)[0].decode('ascii', errors='replace')
+    if ram_profile.startswith('RAM_PROFILE_'):
+        before['incoming_fdt_ram_profile'] = ram_profile
     (args.out / 'before.json').write_text(json.dumps(before, indent=2)+'\n')
-    print('USB monitor active on cpu@100; requesting XNU handoff', flush=True)
+    if size == 0x23e000000:
+        samples = []
+        for offset in (0x200000000, size - 512):
+            sample = read_ram(offset, 512)
+            samples.append({'offset': offset, 'physical': phys + offset,
+                            'request': 0x59, 'bytes': len(sample),
+                            'sha256': hashlib.sha256(sample).hexdigest()})
+        (args.out / 'ram9g-read-survey.json').write_text(json.dumps({
+            'scope': 'bounded read protocol only; no allocation or DRAM integrity test',
+            'samples': samples,
+        }, indent=2) + '\n')
+        print('RAM9G: request 0x59 read two 512-byte samples above 8 GiB; integrity not tested', flush=True)
+    print('USB monitor active on cpu@100', flush=True)
     ufs=request(0x4b,96)
     names='magic version ahb axi unipro gdsc valid reserved cap hci_version ahit interrupt_status interrupt_enable host_status host_enable list_lo list_hi doorbell list_running task_list_lo task_list_hi task_doorbell task_running uic_command'.split()
     (args.out / 'ufs-before.json').write_text(json.dumps(dict(zip(names,struct.unpack('<24I',ufs))),indent=2)+'\n')
@@ -349,12 +432,21 @@ def main():
         if args.no_handoff:
             raise SystemExit('touch test done; no handoff')
     if args.touch_power:
-        power=list(struct.unpack('<64I',request(0x55,256,0x5450,9,timeout=20000)))
-        (args.out/'touch-power.json').write_text(json.dumps(power)+'\n')
-        print('touch power',[hex(v) for v in power[:36]],flush=True)
+        try:
+            power=list(struct.unpack('<64I',request(0x55,256,0x5450,9,timeout=20000)))
+            (args.out/'touch-power.json').write_text(json.dumps(power)+'\n')
+            print('touch power',[hex(v) for v in power[:36]],flush=True)
+        except Exception as e:
+            print(f'[WARN] touch power probe bypassed ({e})', flush=True)
     if args.no_handoff:
         raise SystemExit('--no-handoff: stopping before the XNU handoff')
-    request(0x49, 88, 0x584e)
+    if cur_status.get('stage', 0) < 8:
+        try:
+            request(0x49, 88, 0x584e)
+        except Exception as e:
+            print(f'[MONITOR] Handoff request note: {e}', flush=True)
+    else:
+        print('[MONITOR] XNU already running; skipping handoff request', flush=True)
     handoff = time.monotonic()
     next_thermal = handoff
     thermal_file = (args.out / 'thermal.jsonl').open('w') if args.thermal_log else None
@@ -362,90 +454,182 @@ def main():
     previous = None
     until = time.monotonic() + args.seconds
     renew = time.monotonic() + 600
-    def save_framebuffer(name):
-        raw=bytearray()
-        for off in range(0,1080*2400*4,512):
-            raw.extend(request(0x4e,min(512,1080*2400*4-off),off&0xffff,off>>16))
+    def read_framebuffer():
+        identity = monitor()
+        def reconnect_framebuffer():
+            nonlocal dev
+            usb.util.dispose_resources(dev)
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                time.sleep(1)
+                candidate = find_probe()
+                if candidate is None:
+                    continue
+                dev = candidate
+                try:
+                    current = monitor()
+                except usb.core.USBError:
+                    usb.util.dispose_resources(dev)
+                    continue
+                if any(current[key] != identity[key] for key in ('image', 'end', 'entry', 'boot_args', 'launch')):
+                    raise ValueError('framebuffer reconnect reached a different monitor boot')
+                return
+            raise RuntimeError('framebuffer probe did not return within 30 seconds')
+        return read_framebuffer_bytes(request, args.framebuffer_height, reconnect_framebuffer)
+    def save_framebuffer(name,raw=None):
+        if raw is None:
+            raw=read_framebuffer()
         if name=='framebuffer':
             (args.out/'framebuffer.bgra').write_bytes(raw)
         rows=[]
-        for y in range(2400):
+        for y in range(args.framebuffer_height):
             line=raw[y*4320:(y+1)*4320]
             rgb=bytearray(1080*3)
             rgb[0::3],rgb[1::3],rgb[2::3]=line[2::4],line[1::4],line[0::4]
             rows.append(b'\0'+rgb)
         def chunk(kind,data):
             return struct.pack('>I',len(data))+kind+data+struct.pack('>I',zlib.crc32(kind+data))
-        png=b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',1080,2400,8,2,0,0,0))
+        png=b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',1080,args.framebuffer_height,8,2,0,0,0))
         png+=chunk(b'IDAT',zlib.compress(b''.join(rows),6))+chunk(b'IEND',b'')
         (args.out/(name+'.png')).write_bytes(png)
+        return raw
+    def find_probe():
+        if _usb_backend:
+            found = list(usb.core.find(find_all=True, idVendor=0x1209, idProduct=0x0001, backend=_usb_backend))
+        else:
+            found = list(usb.core.find(find_all=True, idVendor=0x1209, idProduct=0x0001))
+        return found[0] if found else None
+
     tour_tail, tour_done, ring = b'', set(), None
+    # payload 旁的 tour-shots.txt（例如「5,8,12」）：fuxitapcmd 每個 t／s 也會發標記，每張讀取 ~17 s 且常讓 USB 斷；
+    # 只截這幾號（通常是 p 指令，腳本在它們後面留足等待），也不做第二次比對讀取。核心 printf 會截斷長腳本，
+    # 主機端無法從 console 推算，所以由產生 loader 的人給號碼。monitor 由 WMI 啟動，不繼承環境變數，故用檔案。
+    tour_only = None
+    tour_file = Path(args.payload).parent / 'tour-shots.txt' if args.payload else None
+    if args.tour_shots and tour_file and tour_file.is_file():
+        listed = tour_file.read_text(encoding='ascii').strip()
+        if not re.fullmatch(r'\d+(,\d+)*', listed):
+            raise SystemExit('bad %s: %r' % (tour_file, listed))
+        tour_only = {int(n) for n in listed.split(',')}
+        args.tour_verify = False
+        print('tour shots limited to', sorted(tour_only), 'by', tour_file, flush=True)
+    tour_pending = {}  # shot number -> marker match, kept until the framebuffer read completes
+    shot_tries = {}  # a USB drop during the ~16 s read used to lose the shot for good; retry after the reconnect
     with (args.out / 'progress.jsonl').open('w') as progress, (args.out / 'boot.log').open('wb') as log:
+        drops = 0
         while time.monotonic() < until:
-            status = monitor()
-            if status['stage'] == 99:
-                status['error'] = request(0x48, 128).split(b'\0', 1)[0].decode(errors='replace')
-            if status['stage'] >= 8 and status['stage'] != 99:
-                early = read_ram(offsets['_fuxi_early_status'], 128)
-                status['kernel_stage'] = struct.unpack_from('<Q', early)[0]
-                status['kernel_label'] = early[8:].split(b'\0', 1)[0].decode(errors='replace')
-                total = struct.unpack('<Q', read_ram(offsets['_sweet_log_total'], 8))[0]
-                status['console_total'] = total
-                if not last_total <= total < 0x10000000:
-                    raise ValueError(f'invalid console counter: {total}')
-                start = max(last_total, total - 65536)
-                if start > last_total:
-                    status['missed_console_bytes'] = start - last_total
-                if ring is None:
-                    ring = struct.unpack('<Q', read_ram(offsets['_sweet_log_size'], 8))[0] if '_sweet_log_size' in offsets else RING_DEFAULT
-                    if not 0x10000 <= ring <= RING_DEFAULT or ring & (ring - 1):
-                        raise ValueError(f'invalid console ring size: {ring:#x}')
-                while start < total:
-                    index = start % ring
-                    length = min(total-start, ring-index)
-                    data = read_ram(offsets['_sweet_log_ring']+index, length)
-                    log.write(data)
-                    tour_tail = (tour_tail+data)[-4096:] if args.tour_shots else b''
-                    start += length
-                log.flush()
-                last_total = total
-                for m in re.finditer(rb'FUXI TOUR: shot (\d+) ([a-z-]+)\n', tour_tail):
-                    if m.group(1) not in tour_done:
-                        tour_done.add(m.group(1))
-                        shot_start = time.monotonic()
-                        save_framebuffer('framebuffer-shot%s-%s' % (m.group(1).decode(), m.group(2).decode()))
-                        print('tour shot', m.group(1).decode(), m.group(2).decode(), 'saved in %.1f s' % (time.monotonic()-shot_start), flush=True)
-            if args.display_poll:
-                status['display'] = display_poll()
-            progress.write(json.dumps(status)+'\n')
-            progress.flush()
-            brief = {k: status[k] for k in ('stage','kernel_stage','kernel_label','console_total','error') if k in status}
-            if brief != previous:
-                print(brief, flush=True)
-                previous = brief
-            if status['stage'] == 99:
-                break
-            if cpu_at and time.monotonic() - handoff >= cpu_at[0][0]:
-                try:  # never let a thermal-lane request end the console log
-                    cpu_apply(cpu_at.pop(0)[1], thermal_events)
-                except Exception as e:
-                    print('cpu level change failed:', e, flush=True)
-                (args.out / 'thermal-events.json').write_text(json.dumps(thermal_events, indent=1) + '\n')
-            if thermal_file and time.monotonic() >= next_thermal:
-                next_thermal = max(next_thermal + args.thermal_log, time.monotonic())
+          try:
+                status = monitor()
+                if status['stage'] == 99:
+                    status['error'] = request(0x48, 128).split(b'\0', 1)[0].decode(errors='replace')
+                if status['stage'] >= 8 and status['stage'] != 99:
+                    early = read_ram(offsets['_fuxi_early_status'], 128)
+                    status['kernel_stage'] = struct.unpack_from('<Q', early)[0]
+                    status['kernel_label'] = early[8:].split(b'\0', 1)[0].decode(errors='replace')
+                    total = struct.unpack('<Q', read_ram(offsets['_sweet_log_total'], 8))[0]
+                    status['console_total'] = total
+                    if not last_total <= total < 0x10000000:
+                        # Early kernel init: wait for XNU console initialization
+                        if time.monotonic() % 2 < 0.1:
+                            print(f"[XNU] Early init in progress (raw total={total:#x})...", flush=True)
+                        time.sleep(0.05)
+                        continue
+                    if ring is None:
+                        ring = offsets.get('_sweet_log_size_val', 256 * 1024)
+                    start = max(last_total, total - ring)
+                    tour_fresh = b''
+                    while start < total:
+                        index = start % ring
+                        length = min(total-start, ring-index)
+                        data = read_ram(offsets['_sweet_log_ring']+index, length)
+                        log.write(data)
+                        if args.tour_shots:
+                            tour_fresh += data
+                        start += length
+                    log.flush()
+                    last_total = total
+                    # Scan everything read in this poll before trimming: trimming per chunk to 4 KiB dropped a marker
+                    # whenever more than 4 KiB of console (e.g. Wi-Fi bring-up) followed it within one poll.
+                    tour_scan = tour_tail + tour_fresh
+                    tour_tail = tour_scan[-4096:]
+                    for m in re.finditer(rb'FUXI TOUR: shot (\d+) ([a-z-]+)\n', tour_scan):
+                        if m.group(1) in tour_pending or m.group(1) in tour_done:
+                            continue
+                        tour_pending[m.group(1)] = m
+                        if tour_only is not None and int(m.group(1)) not in tour_only:
+                            tour_done.add(m.group(1))
+                    for m in list(tour_pending.values()):
+                        if m.group(1) not in tour_done and shot_tries.get(m.group(1), 0) < 3:
+                            shot_tries[m.group(1)] = shot_tries.get(m.group(1), 0) + 1
+                            shot_start = time.monotonic()
+                            shot_name = 'framebuffer-shot%s-%s' % (m.group(1).decode(), m.group(2).decode())
+                            first = save_framebuffer(shot_name)
+                            tour_done.add(m.group(1))  # only once the read completed (a USBError above retries it after the reconnect)
+                            print('tour shot', m.group(1).decode(), m.group(2).decode(), 'saved in %.1f s' % (time.monotonic()-shot_start),
+                                  '(try %d)' % shot_tries[m.group(1)] if shot_tries[m.group(1)] > 1 else '', flush=True)
+                            if args.tour_verify:
+                                second = read_framebuffer()
+                                changed = [y for y in range(args.framebuffer_height) if first[y*4320:(y+1)*4320] != second[y*4320:(y+1)*4320]]
+                                rows = len(changed)
+                                if rows:
+                                    save_framebuffer(shot_name+'-b', second)
+                                # A minute tick of the status-bar clock alone changes only rows above ~130.
+                                print('tour shot', m.group(1).decode(), 'verify', 'static' if not rows else 'moving', 'rows_changed', rows,
+                                      'span %d-%d' % (changed[0], changed[-1]) if changed else '', 'in %.1f s' % (time.monotonic()-shot_start), flush=True)
+                if args.display_poll:
+                    status['display'] = display_poll()
+                progress.write(json.dumps(status)+'\n')
+                progress.flush()
+                brief = {k: status[k] for k in ('stage','kernel_stage','kernel_label','console_total','error') if k in status}
+                if brief != previous:
+                    print(brief, flush=True)
+                    previous = brief
+                if status['stage'] == 99:
+                    break
+                if cpu_at and time.monotonic() - handoff >= cpu_at[0][0]:
+                    try:  # never let a thermal-lane request end the console log
+                        cpu_apply(cpu_at.pop(0)[1], thermal_events)
+                    except Exception as e:
+                        print('cpu level change failed:', e, flush=True)
+                    (args.out / 'thermal-events.json').write_text(json.dumps(thermal_events, indent=1) + '\n')
+                if thermal_file and time.monotonic() >= next_thermal:
+                    next_thermal = max(next_thermal + args.thermal_log, time.monotonic())
+                    try:
+                        t = thermal_sample()
+                    except usb.core.USBError as e:
+                        t = {'error': str(e), 'temps': {}, 'invalid': [], 'cpu': []}
+                    t['time'] = time.time()
+                    t['since_handoff'] = round(time.monotonic() - handoff, 1)
+                    t['kernel_label'] = status.get('kernel_label')
+                    thermal_file.write(json.dumps(t) + '\n'); thermal_file.flush()
+                    print('thermal +%ds' % t['since_handoff'], thermal_brief(t), flush=True)
+                if args.reset_minutes and time.monotonic() > renew:
+                    request(0x54, 8, args.reset_minutes)
+                    renew = time.monotonic() + 600
+                time.sleep(.25)
+          except usb.core.USBError as e:
+            # USB reconnect: the host sometimes loses the probe for a moment (Errno 2 Entity not found) while the phone keeps
+            # running; wait for it to enumerate again and carry on from last_total (the console ring is 256 KiB).
+            drops += 1
+            print(f'[MONITOR] USB error ({e}); waiting for the probe to come back (drop {drops})', flush=True)
+            try:
+                usb.util.dispose_resources(dev)
+            except Exception:
+                pass
+            t0, fresh = time.monotonic(), None
+            while fresh is None and time.monotonic() - t0 < 90 and time.monotonic() < until:
+                time.sleep(1)
                 try:
-                    t = thermal_sample()
-                except usb.core.USBError as e:
-                    t = {'error': str(e), 'temps': {}, 'invalid': [], 'cpu': []}
-                t['time'] = time.time()
-                t['since_handoff'] = round(time.monotonic() - handoff, 1)
-                t['kernel_label'] = status.get('kernel_label')
-                thermal_file.write(json.dumps(t) + '\n'); thermal_file.flush()
-                print('thermal +%ds' % t['since_handoff'], thermal_brief(t), flush=True)
-            if args.reset_minutes and time.monotonic() > renew:
-                request(0x54, 8, args.reset_minutes)
-                renew = time.monotonic() + 600
-            time.sleep(.25)
+                    cand = find_probe()
+                    if cand is not None and bytes(cand.ctrl_transfer(0xc0, 0x46, 0, 0, 88, timeout=3000))[:8] == b'FXIMON01':
+                        fresh = cand
+                except (usb.core.USBError, ValueError):
+                    pass
+            if fresh is None:
+                print('[MONITOR] probe did not come back within 90 s', flush=True)
+                raise
+            dev = fresh
+            print(f'[MONITOR] USB reconnect after {time.monotonic() - t0:.1f} s, console from {last_total}', flush=True)
     (args.out/'display-after.bin').write_bytes(request(0x42,432))
     if args.framebuffer:
         save_framebuffer('framebuffer')

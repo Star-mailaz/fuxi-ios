@@ -5,9 +5,38 @@
 #include "console.h"
 #include "../fuxi-probe/monitor.h"
 #include "../fuxi-probe/gpu-handoff.h"
+#include "fuxi-ram-profile.h"
 void probe_main(uintptr_t fdt);
 uint64_t probe_fdt_address(void);
 uint32_t probe_fdt_bytes(void);
+uint32_t probe_safe_rd32(uint64_t address, uint32_t *faulted);
+
+static uint32_t loader_fdt_bytes;
+
+static enum FuxiRamProfileResult loader_check_ram(uintptr_t fdt)
+{
+ extern const unsigned char _head[], _end[];
+ if (!fdt || (fdt & 7u)) return FuxiRamProfileArgument;
+ if (fdt > UINTPTR_MAX - 40u) return FuxiRamProfileOverflow;
+ uint32_t faulted = 0;
+ uint32_t magic = probe_safe_rd32(fdt, &faulted);
+ if (faulted || magic != UINT32_C(0xedfe0dd0)) return FuxiRamProfileHeader;
+ uint32_t bytes = __builtin_bswap32(probe_safe_rd32(fdt + 4u, &faulted));
+ if (faulted || bytes < 40u || bytes > FUXI_RAM_FDT_MAX_BYTES) return FuxiRamProfileBounds;
+ uint32_t readable = (bytes + 3u) & ~UINT32_C(3);
+ if (readable > UINTPTR_MAX - fdt) return FuxiRamProfileOverflow;
+ if (fuxi_ram_profile_intersects(fdt, fdt + readable, (uintptr_t)_head, (uintptr_t)_end) ||
+     fuxi_ram_profile_intersects(fdt, fdt + readable, FG_RAM_BASE, FG_RAM_BASE + FG_BANK_SIZE))
+  return FuxiRamProfileConflict;
+ for (uint32_t offset = 0; offset < readable; offset += 4u) {
+  (void)probe_safe_rd32(fdt + offset, &faulted);
+  if (faulted) return FuxiRamProfileBounds;
+ }
+ enum FuxiRamProfileResult result = fuxi_ram_profile_check((const void *)fdt, bytes,
+     FG_RAM_BASE, FG_BANK_SIZE);
+ if (result == FuxiRamProfileStaticOk12G) loader_fdt_bytes = bytes;
+ return result;
+}
 
 /* boot_args.CommandLine: 608 bytes up to xnu-8796 (payload v1), 1024 in xnu-12377 (v2) */
 #define BOOT_LINE_V1		608
@@ -66,8 +95,6 @@ static void zero64(uintptr_t dst, uint64_t n)
 		d[i] = 0;
 }
 
-/* No GPU initialization here. The top-of-bank reservation is outside every accepted XNU window.
- * Publishing magic last makes a missing/partial firmware set fail closed. */
 static void stage_gpu_firmware(void)
 {
  extern const uint8_t _gpu_fw_start[], _gpu_fw_end[];
@@ -145,6 +172,10 @@ static const char *loader_boot(void)
    entry_found=1;
  }
  if (!entry_found) return "entry outside kernel segments";
+ if (!loader_fdt_bytes || probe_fdt_bytes() != loader_fdt_bytes ||
+     fuxi_ram_profile_check((const void *)(uintptr_t)probe_fdt_address(), loader_fdt_bytes,
+         FG_RAM_BASE, FG_BANK_SIZE) != FuxiRamProfileStaticOk12G)
+  return "incoming FDT RAM profile changed";
 
  /* Reject all loader/FDT overlap with the reservation before writing it. */
  { /* All supported layouts exclude the same top-of-bank scratch. */
@@ -207,8 +238,6 @@ static const char *loader_boot(void)
  monitor_report[MON_STAGE]=7;
 	uintptr_t entry_pa = p->entry_va + pa_of_va_base;
  monitor_report[MON_ENTRY]=entry_pa;
-	con_hex("JUMP", entry_pa);
-	con_str("XNU", "jumping (fbcon clears screen)");
 
 	/* Everything was written with the MMU and caches off; drop any stale I-cache lines too. */
 	__asm__ volatile("dsb sy; ic iallu; dsb sy; isb" ::: "memory");
@@ -220,6 +249,25 @@ static const char *loader_boot(void)
 
 void loader_main(uintptr_t fdt)
 {
+ enum FuxiRamProfileResult ram_result = loader_check_ram(fdt);
+ if (ram_result != FuxiRamProfileStaticOk12G) {
+  static const char rejected[] = "RAM_PROFILE_REJECT_";
+  static const char digits[] = "0123456789abcdef";
+  for (unsigned index = 0; index < sizeof(rejected) - 1; index++) monitor_error[index] = rejected[index];
+  monitor_error[sizeof(rejected) - 1] = digits[((unsigned)ram_result >> 4) & 15u];
+  monitor_error[sizeof(rejected)] = digits[(unsigned)ram_result & 15u];
+  monitor_error[sizeof(rejected) + 1] = 0;
+  monitor_report[MON_STAGE] = 99;
+  __asm__ volatile("dsb sy" ::: "memory");
+  return;
+ }
+ static const char accepted[] =
+#if defined(FUXI_RAM_9G)
+     "RAM_PROFILE_OK12_9G";
+#else
+     "RAM_PROFILE_OK12_5G";
+#endif
+ for (unsigned index = 0; index < sizeof(accepted); index++) monitor_error[index] = accepted[index];
  probe_main(fdt);
  monitor_report[MON_STAGE]=4;
  /* Refuse to draw unless ABL left the measured SSPP0/CTL0 splash active. */
@@ -227,8 +275,9 @@ void loader_main(uintptr_t fdt)
  if (sspp[0x14/4] != 0xb8000000 || sspp[0x24/4] != 4320 ||
      sspp[0] != ((2400u<<16)|1080u) || sspp[0x30/4] != 0x237ff)
   con_fb=0; /* USB diagnostics also work without a usable inherited scanout. */
- con_clear(BLUE);
- con_str("FUXI", "XNU loader + USB monitor");
+ if (con_fb) {
+		zero64(FB_BASE, (uint64_t)FB_STRIDE * FB_H);
+ }
  const char *error=loader_boot();
  con_str("ERROR", error);
  for (unsigned i=0;i<sizeof(monitor_error)-1 && error[i];i++) monitor_error[i]=error[i];

@@ -1,10 +1,16 @@
 /* M6 cold handoff, shared by the loader and XNU. No firmware bytes here. */
 #ifndef FUXI_GPU_HANDOFF_H
 #define FUXI_GPU_HANDOFF_H
-#define FG_BANK_SIZE 0x140000000ULL
 #define FG_RAM_BASE 0x8c0000000ULL
+#if defined(FUXI_RAM_9G)
+#define FG_BANK_SIZE 0x240000000ULL
+#define FG_RAM_SIZE 0x23e000000ULL
+#define FG_SCRATCH  0xafe000000ULL
+#else
+#define FG_BANK_SIZE 0x140000000ULL
 #define FG_RAM_SIZE 0x13e000000ULL
 #define FG_SCRATCH  0x9fe000000ULL
+#endif
 #define FG_SCRATCH_SIZE 0x02000000u
 #define FG_HANDOFF  (FG_SCRATCH + 0x1800000)
 #define FG_FW_BASE  (FG_HANDOFF + 0x4000)

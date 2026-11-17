@@ -138,19 +138,33 @@ def build(cpus=1, psci_method='smc', seed=None, mem_size=fuxi.MEM_SIZE, product=
         children.append(node('psci', [('compatible', cstr('arm,psci-1.0')), ('method', cstr(psci_method))]))
     children += [
         node('defaults', [('sleep-disabled', u32(1)), ('vmm-present', u32(1)),
-                          ('kern.maxvnodes', u32(78848))]),
+                          ('kern.maxvnodes', u32(78848)), ('no-effaceable-storage', u32(1))]),
         node('options'),
+        node('buttons', [
+            ('button-names', cstr('volup') + cstr('voldown') + cstr('hold')),
+            ('home-button-type', u32(2)),
+            ('opposed-power-vol-buttons', u32(1)),
+        ]),
         node('product', [('product-name', cstr(PRODUCTS[product][0])), ('model', cstr(PRODUCTS[product][1]))]),
         node('arm-io', [
             ('device_type', cstr('arm-io')),
             ('#address-cells', u32(2)),
             ('#size-cells', u32(2)),
             ('ranges', u64(0, ARMIO_BASE, ARMIO_SIZE)),
-        ], [node('intc', [
-            ('compatible', cstr('arm,gic-v3')),
-            ('reg', u64(fuxi.GICD - ARMIO_BASE, 0x10000, fuxi.GICR - ARMIO_BASE, fuxi.GICR_SIZE)),
-            ('redistributor-stride', u64(GICR_STRIDE)),
-        ])]),
+        ], [
+            node('intc', [
+                ('compatible', cstr('arm,gic-v3')),
+                ('reg', u64(fuxi.GICD - ARMIO_BASE, 0x10000, fuxi.GICR - ARMIO_BASE, fuxi.GICR_SIZE)),
+                ('redistributor-stride', u64(GICR_STRIDE)),
+            ]),
+            node('wdt', [('no-pmu', u32(1))]),
+            node('disp0', [
+                ('device_type', cstr('display-subsystem')),
+                ('compatible', cstr('sweet,display')),
+                ('canvas-width', u32(1125)),
+                ('canvas-height', u32(2436)),
+            ]),
+        ]),
         node('sweet-fbcon', [
             ('reg', u64(fuxi.FB, fuxi.FB_SIZE)),
             ('width', u32(FB_W)),

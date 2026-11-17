@@ -31,6 +31,20 @@ _start:
  str xzr, [x1], #8
  b 1b
 2:
+#if defined(FUXI_CHAIN)
+ /* chain.c: recovery-mode boot -> embedded Linux Image in place (x0 = fdt,
+  * x1-x3 = 0, MMU/caches still off, nothing else touched); else XNU. */
+ mov x0, x19
+ bl chain_select
+ cbz x0, 6f
+ mov x4, x0
+ mov x0, x19
+ mov x1, xzr
+ mov x2, xzr
+ mov x3, xzr
+ br x4
+6:
+#endif
  mov x0, x19
  bl loader_main
 fatal:
