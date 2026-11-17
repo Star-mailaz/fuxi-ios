@@ -35,14 +35,45 @@
 | --- | --- | --- |
 | 系統啟動 | 可進入 iOS 桌面 | iOS 16.7.16／XNU 8796.141.3；近期本機 9g 核心可進 SpringBoard。[E1](docs/status-20261118.zh-TW.md#e1) |
 | 螢幕顯示 | 可顯示桌面與 App | 實體 framebuffer **1080×2400**，stride **4320 bytes**。[E1](docs/status-20261118.zh-TW.md#e1) |
-| 螢幕更新時序 | 120 Hz 模式已啟用 | 實機 TE 統計曾達 **120.8 Hz**；這是面板時序，不等於介面持續 120 FPS。[E1](docs/status-20261118.zh-TW.md#e1) |
-| GPU／Metal | GPU 桌面出幀可用 | 00:31 那趟 SCANOUT 最後一筆為 **16920 幀＝16919 GPU＋1 CPU**；27 筆 GPU presents 統計均為 failed=0。網頁相容性及紫色顯示異常仍待改善。[E1](docs/status-20261118.zh-TW.md#e1) |
+| 螢幕更新時序 | 120 Hz 模式已啟用 | 最新已查驗開機的 TE 為 **120.7–120.9 Hz**；面板時序與實際 shown-FPS 分開記錄。[查驗結果](docs/cpu-gpu-final-20261118.zh-TW.md) |
 | 觸控 | 可點擊、滑動 | 同趟記錄 **245 次 down／245 次 up、241 段完成接觸**；這些是驅動紀錄，不是每次 UIKit 操作成功率。[E1](docs/status-20261118.zh-TW.md#e1) |
 | 觸控採樣／回報率 | **實測典型回報約 120 Hz** | 99 段較長單指接觸的回報間隔中位數 **8.333 ms**；驅動接觸時輪詢 **4 ms＝250 Hz**、閒置時 **8 ms＝125 Hz**。硬體內部掃描率尚無獨立量測。[E1](docs/status-20261118.zh-TW.md#e1) |
 | 多點觸控 | 已有雙指回報 | 同趟最大同時接觸數 **2**；程式上限 10 指，尚未據此宣稱十指手勢通過。[E1](docs/status-20261118.zh-TW.md#e1) |
 | 實體按鍵 | 電源鍵事件可讀 | 電源／音量鍵驅動輪詢 **20 ms＝50 Hz**；最新回退趟可見電源按下／放開及螢幕背光切換，音量完整操作另待驗收。[E2](docs/status-20261118.zh-TW.md#e2) |
 | 螢幕亮度 | 背光控制路徑已接通 | 連拉 8 次滑桿的歷史測試中，brightness 請求序號達 **3584**，該 console 未見 no clean completion；持續使用時的實際面板亮度仍需人眼驗收。[E10](docs/status-20261118.zh-TW.md#e10) |
 | 狀態欄 | 已調整位置 | 既有量測時間／電池中心約 **87.5 px**；實體鏡頭孔精確對齊尚待確認。[E16](docs/status-20261118.zh-TW.md#e16) |
+
+### CPU 調度與頻率
+
+以下為最後已保存並查驗的本機 `kernel-local-wifiux2-9g-artifact` 暫時開機結果；日常 `boot_b` 目前內容未重新讀取。
+
+| 項目 | 最終現狀 | 數據與限制 |
+| --- | --- | --- |
+| CPU 啟用 | XNU 使用 **7 顆** | 另 1 顆 A510 供 loader USB monitor；Prime 已啟動，邏輯 CPU 6＝MPIDR 0x700。 |
+| 執行緒調度 | **推薦核心 0x7c 已生效** | 同質 clutch＋邏輯 **2–6（Gold／Prime）**推薦集合；小核仍處理中斷與綁定執行緒，完整 AMP／Edge 調度尚未移植。 |
+| CPU 動態調頻 | **`fuxiperf=2` 已生效** | 有實際 boosted／cool／idle 紀錄；輸入 boost hold **1500 ms**，受熱條件與守門約束。 |
+| CPU 狀態回讀 | Gold 最高 **2.323 GHz**／Prime **2.592 GHz** | 為 EPSS 狀態暫存器換算的窗口峰值，不是持續頻率；高檔 LUT 投票另為 **2.3232／2.3424 GHz**，兩者差異原因待確認。 |
+| 閒置降頻 | **1 秒閒置策略已生效** | Silver／Gold／Prime 的 idle LUT 為 **307.2／499.2／595.2 MHz**；已有 Gold 499／Prime 595 MHz 回讀。 |
+| CPU 熱控制 | 已啟用 | hot **66°C**、limit **72°C**、resume **62°C**；最新 CPU governor 統計最高 **70.6°C**，策略門檻不等於機身溫度保證。 |
+| 繪圖小物件快取 | **`fuxitcache=1` 已生效** | 明確記錄 `FUXI TCACHE: on`；16–512 bytes，每個尺寸級別每執行緒 64 blocks。 |
+
+### GPU 與顯示管線
+
+| 項目 | 最終現狀 | 數據與限制 |
+| --- | --- | --- |
+| GPU／Metal | **Adreno 740 GPU 桌面可用** | NativeMetal／bridge → metal2vulkan → Turnip → NativeAdreno ABI；Vulkan 為內部後端，不推定所有 Metal 功能相容。 |
+| GPU 資源匯入 | ABI v2／HostImport 16K 已開啟 | backboardd 已開啟 NativeAdrenoGpuPublished。 |
+| GPU 頻率策略 | **680／220 MHz 投票往返已觀察** | `fuxigpulevel=24`＝cap 8＋governor；無新 doorbell **100 ms** 後降到 floor。最新一筆 DCVS 為 **64 次升／64 次降、fails=0**，不是整趟總數。 |
+| GPU 實際時脈 | 尚無直接量測值 | console 為 `core_measured_khz=unavailable`；680／220 MHz 是 HFI 投票值。 |
+| 記憶體頻寬 | 高低檔頻寬請求已配置 | **12449218／2136718 kB/s**，不是實測 DDR 吞吐。 |
+| Turnip 設定 | **`fuxitudebug=nocb` 生效** | 關閉 concurrent binning；目前未啟用 `fuxihyb=8` 或獨立 Hybrid Turnip 選擇。 |
+| swap／VSync | **swap wait=0／TE offset=6000 us** | 額外 swap hook 等待關閉，核心確認 6 ms offset；保留 fence、writer 與 scanout 保護。 |
+| 顯示緩衝 | double／triple buffering 啟用 | 實機有三緩衝 flips；面板 TE **120.7–120.9 Hz**。 |
+| GPU 出幀 | 最新摘要 **9600 幀** | **9594 GPU＋6 CPU**；15 筆 GPU presents 的 failed 均為 0。 |
+| scanout 複製 | 摘要平均 **4.581 ms**／最大 **29.433 ms** | 這是複製路徑耗時，並非整幀端到端延遲。 |
+| 持續畫面 FPS | 尚未完成統一負載驗收 | 不以 120 Hz 面板時序代替 shown-FPS；紫色顯示異常與部分網站／App 相容性仍待改善。 |
+
+[CPU／GPU 最終配置、有效參數與查驗來源](docs/cpu-gpu-final-20261118.zh-TW.md)。
 
 ### 網路與通訊
 
