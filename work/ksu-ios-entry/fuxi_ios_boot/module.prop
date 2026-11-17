@@ -1,0 +1,6 @@
+id=fuxi_ios_boot
+name=雙系統選單（小米 13）
+version=v9
+versionCode=9
+author=local
+description=按「執行」：檢查映像、boot_b 與 TWRP，再進 dualboot 選單。音量鍵選擇 Android／iOS，短按電源確認。回 Slot A 可用 TWRP。

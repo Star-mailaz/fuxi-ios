@@ -1,0 +1,2 @@
+stage-wifi-logging.sh text eol=lf
+powerlog-state-guest.sh text eol=lf

@@ -1,0 +1,197 @@
+﻿[CmdletBinding(DefaultParameterSetName = 'Boot')]
+param(
+    [Parameter(Mandatory = $true, ParameterSetName = 'Boot')][string]$Loader,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Boot')][string]$Kernel,
+    [Parameter(Mandatory = $true)][string]$Out,
+    [Parameter(ParameterSetName = 'Boot')][int]$Seconds = 300,
+    [Parameter(ParameterSetName = 'Boot')][int]$Reset = 6,
+    [Parameter(ParameterSetName = 'Boot')][int]$FramebufferHeight = 2400,
+    [Parameter(ParameterSetName = 'Boot')][switch]$FinalFramebuffer,
+    [Parameter(ParameterSetName = 'Boot')][string]$Dylib,
+    [Parameter(ParameterSetName = 'Boot')][ValidatePattern('^[a-f0-9]{64}$')][string]$DylibSha,
+    [Parameter(ParameterSetName = 'Boot')][string]$TurnipHybrid,
+    [Parameter(ParameterSetName = 'Boot')][ValidatePattern('^[a-f0-9]{64}$')][string]$TurnipSha,
+    [Parameter(Mandatory = $true, ParameterSetName = 'InspectWifi')][switch]$InspectWifi,
+    [Parameter(Mandatory = $true, ParameterSetName = 'WifiLogging')][ValidateSet('enable', 'disable')][string]$WifiLogging,
+    [Parameter(Mandatory = $true, ParameterSetName = 'InspectWifiLog')][switch]$InspectWifiLog,
+    [Parameter(Mandatory = $true, ParameterSetName = 'InspectCrash')][switch]$InspectCrash,
+    [Parameter(Mandatory = $true, ParameterSetName = 'DualBoot')][ValidateSet('backup', 'rootbackup', 'prepare', 'survey', 'android', 'recovery', 'ios', 'inspectreturn', 'timing', 'stocktiming', 'removeksu')][string]$DualBootCheck,
+    [Parameter(Mandatory = $true, ParameterSetName = 'DualBoot')][string]$RestorePoint,
+    [Parameter(ParameterSetName = 'DualBoot')][string]$Candidate,
+    [Parameter(ParameterSetName = 'DualBoot')][int]$MenuSeconds = 180,
+    [Parameter(Mandatory = $true, ParameterSetName = 'DeployChain')][ValidatePattern('^chain-[a-z0-9-]+$')][string]$DeployChain,
+    [Parameter(Mandatory = $true, ParameterSetName = 'DeployChain')][ValidatePattern('^chain-[a-z0-9-]+$')][string]$PreviousChain,
+    [Parameter(Mandatory = $true, ParameterSetName = 'DeployChain')][ValidateRange(5, 999)][int]$ModuleVersion,
+    [Parameter(Mandatory = $true, ParameterSetName = 'InstallPersistent')][switch]$InstallPersistent,
+    [Parameter(Mandatory = $true, ParameterSetName = 'ValidatePersistent')][switch]$ValidatePersistent,
+    [Parameter(ParameterSetName = 'ValidatePersistent')][ValidatePattern('^[a-z0-9-]+$')][string]$ResumeAfterIos,
+    [Parameter(ParameterSetName = 'ValidatePersistent')][ValidatePattern('^[a-z0-9-]+$')][string]$InstallReport,
+    [Parameter(Mandatory = $true, ParameterSetName = 'UpgradePersistent')][switch]$UpgradePersistent,
+    [Parameter(Mandatory = $true, ParameterSetName = 'RescueAndroid')][switch]$RescueAndroid,
+    [Parameter(Mandatory = $true, ParameterSetName = 'StartDaily')][ValidatePattern('^chain-[a-z0-9-]+$')][string]$StartDailyChain
+)
+$ErrorActionPreference = 'Stop'
+$workspace = 'D:\xiaomi13\fuxi_ios'
+$storage = Join-Path $workspace 'work\Codex-Xiaomi13-GPU-20261109'
+$phoneLock = Join-Path $workspace 'work\PHONE-LOCK-000'
+$phoneHold = Join-Path $workspace 'work\hybrid-driver\HOLD-PHONE'
+$phonePause = Join-Path $workspace 'work\adsp-battery\hw000\HOLD'
+$gitBash = 'C:\Program Files\Git\bin\bash.exe'
+$serial = $env:FUXI_ANDROID_SERIAL; if (-not $serial) { throw 'Set FUXI_ANDROID_SERIAL to the phone serial shown by adb devices' }
+$token = "000 loader check $Out pid=$PID $(Get-Date -Format o)"
+$ownedLocks = @()
+# Windows PowerShell 5.1：Stop 模式下原生程式寫到 stderr 的字（即使 2>$null，或呼叫端用 *> 轉向）會變成致命錯誤。
+# 手機還沒回 Android 時 adb 會寫「device not found」，曾讓本腳本跳過 reset-soon 與等待回程（2026-11-17 02:41）。
+# 原生程式一律在 Continue 下執行，成敗只看結束碼。
+function Invoke-Native([scriptblock]$Block) {
+    $saved = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $Block } finally { $ErrorActionPreference = $saved }
+}
+function Test-AndroidBooted {
+    "$(Invoke-Native { & adb -s $serial shell getprop sys.boot_completed 2>$null })" -match '^1'
+}
+Set-Location $workspace
+if ([bool]$Dylib -ne [bool]$DylibSha) { throw 'Dylib and its verified SHA256 must be provided together' }
+if ($Dylib -and (Get-FileHash -LiteralPath $Dylib -Algorithm SHA256).Hash.ToLowerInvariant() -ne $DylibSha) {
+    throw 'Dylib hash differs from the verified build'
+}
+if ([bool]$TurnipHybrid -ne [bool]$TurnipSha) { throw 'Turnip and its verified SHA256 must be provided together' }
+if ($TurnipHybrid -and $Dylib) { throw 'Stage one library per phone validation' }
+if ($TurnipHybrid -and (Get-FileHash -LiteralPath $TurnipHybrid -Algorithm SHA256).Hash.ToLowerInvariant() -ne $TurnipSha) {
+    throw 'Turnip hash differs from the verified build'
+}
+foreach ($path in @($phoneLock, $phoneHold, $phonePause)) {
+    if (Test-Path -LiteralPath $path) { throw "Phone is reserved: $path" }
+}
+$running = Get-CimInstance Win32_Process | Where-Object {
+    $_.ProcessId -ne $PID -and $_.CommandLine -notmatch 'Get-CimInstance' -and
+    $_.CommandLine -match 'fuxi-xnu-monitor\.py|boot-exp-v\.ps1|run-monitor\.ps1'
+}
+if ($running) { throw 'Another phone test is running' }
+if ($InstallPersistent -or $ValidatePersistent -or $UpgradePersistent) {
+    $persistArgs = @('-X', 'utf8', '-B', (Join-Path $workspace 'dualboot\install-persistent.py'),
+        '--from-launcher', "$PID", '--out', $Out)
+    if ($ValidatePersistent) { $persistArgs += '--validate' }
+    if ($UpgradePersistent) { $persistArgs += '--upgrade' }
+    if ($ResumeAfterIos) { $persistArgs += @('--resume-after-ios', $ResumeAfterIos) }
+    if ($InstallReport) { $persistArgs += @('--install-report', $InstallReport) }
+    Invoke-Native { & python @persistArgs }
+    if ($LASTEXITCODE -ne 0) { throw 'Persistent dualboot workflow failed; see its report.json' }
+    return
+}
+if ($RescueAndroid) {
+    # Fastboot rescue cannot pull mtd before Android returns. The helper saves
+    # that log after returning to slot a and never starts iOS or flashes images.
+    Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'dualboot\rescue-android.py') --from-launcher "$PID" --out $Out }
+    if ($LASTEXITCODE -ne 0) { throw 'Android rescue needs attention; see its report.json' }
+    return
+}
+if ($StartDailyChain) {
+    $dailyArgs = @('-X', 'utf8', '-B', (Join-Path $workspace 'dualboot\start-daily.py'),
+        '--from-launcher', "$PID", '--chain', $StartDailyChain, '--out', $Out)
+    Invoke-Native { & python @dailyArgs }
+    if ($LASTEXITCODE -ne 0) { throw 'Installed daily boot needs attention; see its report.json' }
+    return
+}
+if ($DualBootCheck) {
+    $dualBootArgs = @('-X', 'utf8', '-B', (Join-Path $workspace 'dualboot\phone-check.py'),
+        '--from-launcher', "$PID", '--action', $DualBootCheck, '--out', $Out,
+        '--restore-point', $RestorePoint, '--seconds', "$MenuSeconds")
+    if ($Candidate) { $dualBootArgs += @('--candidate', $Candidate) }
+    Invoke-Native { & python @dualBootArgs }
+    if ($LASTEXITCODE -ne 0) { throw 'Dual-boot validation failed; see its report.json' }
+    return
+}
+Invoke-Native { & $gitBash 'work/adsp-battery/hw000/fuxi-log.sh' pull }
+if ($LASTEXITCODE -ne 0) { throw 'Persistent log pull failed; next boot stopped' }
+if ($DeployChain) {
+    # Reuse the existing writer and verified recovery flow. It acquires both
+    # locks itself, verifies the 12GB SKU and old boot/module, reads back every
+    # write and preserves a full boot_b plus module restore point.
+    $deployArgs = @('-X', 'utf8', '-B', (Join-Path $workspace 'work\boot-chain\deploy-verified.py'),
+        $PreviousChain, $DeployChain, '--version', "$ModuleVersion")
+    if (Test-Path -LiteralPath (Join-Path $workspace "work\boot-chain\$DeployChain\menu-build-report.json")) {
+        $deployArgs += '--menu-entry'
+    }
+    Invoke-Native { & python @deployArgs }
+    if ($LASTEXITCODE -ne 0) { throw 'Daily chain deployment failed; see its recovery report' }
+    return
+}
+if ($InspectWifi) {
+    Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\statusbar-fix\inspect-powerlog-state.py') `
+        --output (Join-Path $workspace "work\statusbar-fix\$Out") --wifi }
+    if ($LASTEXITCODE -ne 0) { throw 'Read-only Wi-Fi inspection failed' }
+    return
+}
+if ($WifiLogging) {
+    Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\statusbar-fix\phone-readthrough.py') `
+        --wifi-logging $WifiLogging --output (Join-Path $workspace "work\statusbar-fix\$Out") }
+    if ($LASTEXITCODE -ne 0) { throw 'Wi-Fi logging configuration failed' }
+    return
+}
+if ($InspectWifiLog) {
+    Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\statusbar-fix\inspect-powerlog-state.py') `
+        --output (Join-Path $workspace "work\statusbar-fix\$Out") --wifi-log }
+    if ($LASTEXITCODE -ne 0) { throw 'Read-only Wi-Fi log inspection failed' }
+    return
+}
+if ($InspectCrash) {
+    Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\statusbar-fix\inspect-powerlog-state.py') `
+        --output (Join-Path $workspace "work\statusbar-fix\$Out") --crash-reports }
+    if ($LASTEXITCODE -ne 0) { throw 'Read-only crash report inspection failed' }
+    return
+}
+if ($Dylib) {
+    $stageOutput = Join-Path $workspace "work\statusbar-fix\run-$Out-stage"
+    Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\statusbar-fix\phone-readthrough.py') `
+        --dylib $Dylib --sha256 $DylibSha --output $stageOutput }
+    if ($LASTEXITCODE -ne 0) { throw 'Dylib staging failed; next boot stopped' }
+}
+if ($TurnipHybrid) {
+    $stageOutput = Join-Path $workspace "work\statusbar-fix\run-$Out-stage"
+    Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\statusbar-fix\phone-readthrough.py') `
+        --turnip-hybrid $TurnipHybrid --sha256 $TurnipSha --output $stageOutput }
+    if ($LASTEXITCODE -ne 0) { throw 'Turnip staging failed; next boot stopped' }
+}
+try {
+    foreach ($path in @($phoneLock, $phoneHold)) {
+        $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew)
+        try {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($token)
+            $stream.Write($bytes, 0, $bytes.Length)
+        } finally {
+            $stream.Dispose()
+        }
+        $ownedLocks += $path
+    }
+    if (Test-Path -LiteralPath $phonePause) { throw 'Phone work was paused' }
+    "$(Get-Date -Format HH:mm:ss) PHONE_START $token"
+    & (Join-Path $storage 'boot-exp-v.ps1') -Loader $Loader -Out $Out -Kernel $Kernel `
+        -Seconds $Seconds -Reset $Reset -Verifier 'verify-loader-safety.py' `
+        -TourShots:(-not $FinalFramebuffer) -Framebuffer:$FinalFramebuffer `
+        -FramebufferHeight $FramebufferHeight
+    if (-not (Test-AndroidBooted)) {
+        Push-Location $storage
+        try {
+            Invoke-Native { & python reset-soon.py 1 }
+        } finally {
+            Pop-Location
+        }
+    }
+    $deadline = (Get-Date).AddMinutes(5)
+    do {
+        if (Test-AndroidBooted) { break }
+        if ((Get-Date) -gt $deadline) { throw 'Android did not return after the test' }
+        Start-Sleep -Seconds 5
+    } while ($true)
+    "$(Get-Date -Format HH:mm:ss) LOADER_CHECK_DONE $Out"
+} finally {
+    foreach ($path in $ownedLocks) {
+        if ((Test-Path -LiteralPath $path) -and
+            [System.IO.File]::ReadAllText($path) -eq $token) {
+            Remove-Item -LiteralPath $path
+        }
+    }
+    "$(Get-Date -Format HH:mm:ss) PHONE_RELEASED $Out"
+}
