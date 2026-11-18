@@ -120,7 +120,13 @@ enum fuxi_wifi_sta_event {
                                          * COUNTRY_CODE_CHANGED：wifid 收到會清掉掃描快取）；GET 51 回記住的碼 */
 #define FUXI_WIFI_UX_POWER_SAME   16u      /* 要的電源狀態和現在一樣（例如關被開覆蓋）：不呼叫底層、不清連線，
                                          * 只回報電源事件 */
-#define FUXI_WIFI_UX_ALL          31u
+#define FUXI_WIFI_UX_SCAN_RECOVER 32u      /* keep radio control after a failed or cancelled scan */
+#define FUXI_WIFI_UX_SCAN_CHANNELS 64u     /* implicit scans use the advertised 2.4/5 GHz channel list */
+#define FUXI_WIFI_UX_POWER_OFF_FIRST 128u /* finish an off request before a later enable */
+#define FUXI_WIFI_UX_RX_BATCH    256u      /* receive borrowed ath12k fragments directly into batched mbufs */
+#define FUXI_WIFI_UX_LINK_STATS  512u      /* print cached PHY rate and interface byte counts */
+#define FUXI_WIFI_UX_SCAN_TRACE 1024u      /* log the first ath12k scan events */
+#define FUXI_WIFI_UX_ALL        2047u
 
 #ifdef KERNEL
 /* 讀一次 ADT 之後記住（ADT 開機後不變）；沒有這個屬性或長度不對都當 0 */
@@ -138,6 +144,7 @@ int      fuxi_wifi_sta_ask_join(const struct fuxi_wifi_sta_join *what);
 int      fuxi_wifi_sta_ask_leave(void);
 bool     fuxi_wifi_sta_busy(void);                                        /* something asked for is not over yet */
 bool     fuxi_wifi_sta_powered(void);
+bool     fuxi_wifi_sta_power_off_pending(void);
 /* the `index`th access point the last scan heard: true, or false when there are not that many */
 bool     fuxi_wifi_sta_heard(unsigned index, struct fuxi_wifi_sta_bss *bss);
 void     fuxi_wifi_sta_state(struct fuxi_wifi_sta_state *state);

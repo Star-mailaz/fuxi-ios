@@ -14,6 +14,7 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'InspectWifi')][switch]$InspectWifi,
     [Parameter(Mandatory = $true, ParameterSetName = 'WifiLogging')][ValidateSet('enable', 'disable')][string]$WifiLogging,
     [Parameter(Mandatory = $true, ParameterSetName = 'InspectWifiLog')][switch]$InspectWifiLog,
+    [Parameter(Mandatory = $true, ParameterSetName = 'CalibrateRtc')][switch]$CalibrateRtc,
     [Parameter(Mandatory = $true, ParameterSetName = 'InspectCrash')][switch]$InspectCrash,
     [Parameter(Mandatory = $true, ParameterSetName = 'DualBoot')][ValidateSet('backup', 'rootbackup', 'prepare', 'survey', 'android', 'recovery', 'ios', 'inspectreturn', 'timing', 'stocktiming', 'removeksu')][string]$DualBootCheck,
     [Parameter(Mandatory = $true, ParameterSetName = 'DualBoot')][string]$RestorePoint,
@@ -24,8 +25,11 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'DeployChain')][ValidateRange(5, 999)][int]$ModuleVersion,
     [Parameter(Mandatory = $true, ParameterSetName = 'InstallPersistent')][switch]$InstallPersistent,
     [Parameter(Mandatory = $true, ParameterSetName = 'ValidatePersistent')][switch]$ValidatePersistent,
+    [Parameter(ParameterSetName = 'ValidatePersistent')][switch]$IosOnly,
     [Parameter(ParameterSetName = 'ValidatePersistent')][ValidatePattern('^[a-z0-9-]+$')][string]$ResumeAfterIos,
-    [Parameter(ParameterSetName = 'ValidatePersistent')][ValidatePattern('^[a-z0-9-]+$')][string]$InstallReport,
+    [Parameter(ParameterSetName = 'ValidatePersistent')]
+    [Parameter(ParameterSetName = 'UpgradePersistent')]
+    [ValidatePattern('^[a-z0-9-]+$')][string]$InstallReport,
     [Parameter(Mandatory = $true, ParameterSetName = 'UpgradePersistent')][switch]$UpgradePersistent,
     [Parameter(Mandatory = $true, ParameterSetName = 'RescueAndroid')][switch]$RescueAndroid,
     [Parameter(Mandatory = $true, ParameterSetName = 'StartDaily')][ValidatePattern('^chain-[a-z0-9-]+$')][string]$StartDailyChain
@@ -69,10 +73,18 @@ $running = Get-CimInstance Win32_Process | Where-Object {
     $_.CommandLine -match 'fuxi-xnu-monitor\.py|boot-exp-v\.ps1|run-monitor\.ps1'
 }
 if ($running) { throw 'Another phone test is running' }
+if ($CalibrateRtc) {
+    if ($Out -cnotmatch '^[a-z0-9][a-z0-9-]{0,63}$') { throw 'Invalid RTC calibration name' }
+    $calibration = Join-Path $workspace "work\adsp-battery\rtc-calibration-$Out.json"
+    Invoke-Native { & python -X utf8 -B (Join-Path $workspace 'work\adsp-battery\rtc-calibration.py') capture $calibration }
+    if ($LASTEXITCODE -ne 0) { throw 'Read-only RTC calibration failed' }
+    return
+}
 if ($InstallPersistent -or $ValidatePersistent -or $UpgradePersistent) {
     $persistArgs = @('-X', 'utf8', '-B', (Join-Path $workspace 'dualboot\install-persistent.py'),
         '--from-launcher', "$PID", '--out', $Out)
     if ($ValidatePersistent) { $persistArgs += '--validate' }
+    if ($IosOnly) { $persistArgs += '--ios-only' }
     if ($UpgradePersistent) { $persistArgs += '--upgrade' }
     if ($ResumeAfterIos) { $persistArgs += @('--resume-after-ios', $ResumeAfterIos) }
     if ($InstallReport) { $persistArgs += @('--install-report', $InstallReport) }

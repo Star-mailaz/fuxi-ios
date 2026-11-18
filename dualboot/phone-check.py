@@ -180,7 +180,9 @@ def backup_phone(restore, out, state):
 
 
 # 常駐選單已寫入 boot_a 後，RAM 試開仍要能跑：接受原廠或這些已驗證安裝讀回的整顆雜湊。
-INSTALLED_BOOT_A_REPORTS = ("persistent-slot-a-20261118", "persistent-slot-a-upgrade-launching-20261118")
+INSTALLED_BOOT_A_REPORTS = ("persistent-slot-a-20261118", "persistent-slot-a-upgrade-launching-20261118",
+                            "persistent-slot-a-upgrade-countdown-20261118",
+                            "persistent-slot-a-upgrade-wifi-sb103-20261118")
 
 
 def installed_boot_a_shas():
@@ -515,7 +517,11 @@ def boot_android(candidate, restore, out, before, seconds, token, test_recovery=
     need("mapped=true" not in rooted("CLASSPATH=/data/local/tmp/codex-managed-native-image.jar app_process /system/bin ManagedNativeImage status"), "iOS root mapping is still active")
     require_owned_locks(token)
     ram_boot_menu(candidate)
-    say("MENU_WINDOW_OPEN: focus Android and short-press Power to start")
+    countdown = report.get("timeout_seconds", 0)
+    if countdown and not test_recovery:
+        say(f"MENU_WINDOW_OPEN: wait {countdown} seconds for automatic Android boot")
+    else:
+        say("MENU_WINDOW_OPEN: focus Android and short-press Power to start")
     after = wait_for_android(seconds)
     need(after["active_slot"] == before["active_slot"], "Active slot changed")
     handoff = verify_android_handoff(report, after)
@@ -556,6 +562,7 @@ def boot_android(candidate, restore, out, before, seconds, token, test_recovery=
     say("BOOT_PARTITIONS_UNCHANGED; SLOT_UNCHANGED")
     return {"before": before, "after": after, **handoff, "recovery": recovery, "protected_sha256": protected,
             "candidate_sha256": report["candidate"]["sha256"],
+            "configured_android_timeout_seconds": countdown,
             "boot_partition_writes": 0, "slot_changes": 0, "menu_visual_and_keys": "NEEDS_USER_OBSERVATION"}
 
 

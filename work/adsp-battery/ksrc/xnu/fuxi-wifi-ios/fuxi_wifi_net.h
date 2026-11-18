@@ -50,6 +50,11 @@ struct fuxi_wifi_net_link {
 bool fuxi_wifi_net_attach(const struct fuxi_wifi_net_link *link);
 /* A frame has arrived. Copied; the buffer is the caller's again on return. */
 void fuxi_wifi_net_input(const uint8_t *frame, size_t length);
+/* Only the ath12k worker calls these. Read the borrowed packet before returning. */
+void fuxi_wifi_net_input_packet(void *source, size_t length,
+    int (*read)(void *, size_t, void *, size_t));
+void fuxi_wifi_net_flush_rx(void);
+bool fuxi_wifi_net_byte_counts(uint64_t *received, uint64_t *sent);
 /* Frames can pass now / can no longer pass. */
 void fuxi_wifi_net_link_state(bool up);
 

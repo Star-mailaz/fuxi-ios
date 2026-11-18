@@ -2,7 +2,15 @@
 
 ## 常駐 a 槽選單（boot_a）
 
-**現況：boot_a 已是 `menu-launching-20261118`，Android、iOS、Recovery 三條路徑在安裝後都驗過。** 槽位為 a，Android 重開與 iOS 重開都會先進選單；開 iOS 就是重開後在選單選 iOS。boot_b 已換成同一份選單（`chain-v9-dualboot-launching`），只當備援。KSU 模組「雙系統選單」已移除（04:44），Recovery 未改。
+**日常 a 槽已整合 Wi-Fi 修正、狀態欄前置鏡頭對齊和 10 秒 Android 倒數。** `menu-daily-wifi-sb103-20261118` 共通過 454 項主機斷言，15:39:47–15:41:14 RAM 試開，15:41:15–15:42:41 寫入並讀回整個 `boot_a`，再實測倒數自動回 Android。交接位址為 `0xa9210000`，a 槽 active／successful。前版完整回退映像與雜湊在安裝報告。 [RAM 試開](../work/dualboot/daily-wifi-sb103-ram-android-20261118/report.json) · [安裝與回退紀錄](../work/dualboot/persistent-slot-a-upgrade-wifi-sb103-20261118/report.json)
+
+同一份 iOS payload 已在 15:34:09–15:39:05 暫時開機。設定頁時間中心 64 px、右側圖示中心 63.5 px。實機載入手動密碼框和熱點補查，在 5200／5745 MHz 加入成功並回 Android。使用者核對合併版正常。 [合併版實機紀錄](../work/Codex-Xiaomi13-GPU-20261109/native-hw000wifi-sb103-daily-1118/boot.log)
+
+15:43 自動監看回 Android 時，前後的 mtd 雜湊一致。使用者後續從常駐選單手動進 iOS，確認日常版正常並同意合併發布。 [常駐驗證報告](../work/dualboot/persistent-slot-a-validate-wifi-sb103-20261118/report.json)
+
+13:56 版的常駐選單已先驗證 10 秒倒數的 RAM 試開、寫入讀回及回 Android。 [前版安裝報告](../work/dualboot/persistent-slot-a-upgrade-countdown-20261118/report.json)
+
+04:45 版的常駐選單為 `menu-launching-20261118`，Android、iOS、Recovery 三條路徑已驗過。boot_b 保留 `chain-v9-dualboot-launching` 作備援。KSU 模組「雙系統選單」於 04:44 移除。
 
 | 趟次 | 時間 | 內容與結果 | 紀錄 |
 | --- | --- | --- | --- |
@@ -17,7 +25,7 @@
 
 「進入系統中」的修改：使用者回報選擇系統後，畫面會停約 10 秒像沒反應。現在按下確認後，`menu_paint_status` 會把下方按鍵提示與 notice（y=1820–2144）換成「進入系統中」，送出一幀、等 20 ms 再交接，標題和按鈕保留到所選系統接手面板。沒有加計時。444 項主機斷言通過，載入器重連結逐位元相符，payload、核心與 Android 雜湊和上一版相同。boot.img 的 SHA256 為 `7977fbf0c8813ec16d76608bd24b1a930dda769fc1b2a8ed06c690fe013a2773`（66326528 bytes），前後對照圖在 `work/dualboot/menu-launching-20261118/host/compare-launching.png`。
 
-安裝流程：`launch-loader-check.ps1 -InstallPersistent` 首次安裝；`-UpgradePersistent` 從已驗首版升級；`-ValidatePersistent [-InstallReport <安裝紀錄>] [-ResumeAfterIos <逾時的紀錄>]` 驗收。只接受 `install-persistent.py` 裡 `VERIFIED_IMAGES` 已登記、而且有 RAM 試開 Android 紀錄的映像。需要人操作的等待一律放寬到 5 分鐘以上，iOS 回程為 15 分鐘（續跑 30 分鐘）。
+首次安裝使用 `launch-loader-check.ps1 -InstallPersistent`。升級用 `-UpgradePersistent -InstallReport <目前安裝紀錄>`。驗收用 `-ValidatePersistent -InstallReport <安裝紀錄>`，可加上 `-IosOnly` 驗證 iOS 和 Android 回程，或用 `-ResumeAfterIos <前一趟驗證紀錄>` 接續手動試開後的回程。安裝接受 `install-persistent.py` 中已登記且通過 RAM 試開 Android 的映像。等待 iOS 回程為 15 分鐘，續跑為 30 分鐘。若要手動選 iOS 或 Recovery，先在倒數結束前按音量鍵。
 
 **尚未驗收**：其他選項的 Fastboot、重新啟動、關機；完全關機後的冷開機；ABL 重試與回退。b 槽選 Android 仍會循環（b 槽的 system_b 等邏輯分區是空的），不修；不切到 b 槽就不會遇到。
 

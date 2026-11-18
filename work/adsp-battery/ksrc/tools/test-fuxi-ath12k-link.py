@@ -92,7 +92,18 @@ def main():
                 path.write_bytes(original)
                 checks += 1
             original = report_path.read_bytes()
-            for suffix in ('/out/ath12k-src/mac.c', '/src/nw_cfg80211_control.c'):
+            sources = ['/out/ath12k-src/mac.c', '/src/nw_cfg80211_control.c']
+            if 'peer_zero' in record:
+                path = copied / 'fuxi_ath12k.peer-zero.json'
+                provenance = path.read_bytes()
+                path.write_bytes(b'{}\n')
+                rejected(lambda: GATE['validate_bundle'](copied))
+                path.write_bytes(provenance)
+                checks += 1
+                sources.append('/out/ath12k-src/dp_peer.c')
+            if 'scan_priority_wmi_sha256' in record:
+                sources.append('/out/ath12k-src/wmi.c')
+            for suffix in sources:
                 report = json.loads(original)
                 for item in report['objects']:
                     if item.get('source', '').endswith(suffix):

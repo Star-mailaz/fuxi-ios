@@ -22,11 +22,12 @@ int main(void)
     const char *sb = "/System/Library/CoreServices/SpringBoard.app/SpringBoard";
     const char *media = "/usr/sbin/mediaserverd";
     const char *wifi = "/usr/sbin/wifid";
+    const char *settings = "/Applications/Preferences.app/Preferences";
     const char *app = "/Applications/MobileSafari.app/MobileSafari";
     char env[FUXI_INJECT_ENV_MAX];
 
-    assert(FUXI_INJECT_ALL == 15u);
-    for (unsigned mode = 0; mode < 16; mode++) {
+    assert(FUXI_INJECT_ALL == 31u);
+    for (unsigned mode = 0; mode <= FUXI_INJECT_ALL; mode++) {
         assert(same(fuxi_inject_library(mode, sb, "SpringBoard"), (mode & 2u) ? FUXI_INJECT_SB_LIB : NULL));
         assert(same(fuxi_inject_library(mode, media, "mediaserverd"), (mode & 4u) ? FUXI_INJECT_SB_LIB : NULL));
         assert(same(fuxi_inject_library(mode, wifi, "wifid"), (mode & 8u) ? FUXI_INJECT_SB_LIB : NULL));
@@ -34,6 +35,10 @@ int main(void)
         assert(!fuxi_inject_library(mode, "/usr/sbin/wifid2", "wifid2"));
         assert(!fuxi_inject_library(mode, wifi, NULL));
         assert(same(fuxi_inject_library(mode, app, "MobileSafari"), (mode & 1u) ? FUXI_INJECT_APP_LIB : NULL));
+        const char *settings_library = (mode & 1u) ? FUXI_INJECT_APP_LIB : NULL;
+        if (mode & 16u) settings_library = FUXI_INJECT_SB_LIB;
+        assert(same(fuxi_inject_library(mode, settings, "Preferences"), settings_library));
+        assert(!fuxi_inject_library(mode, "/var/tmp/Preferences", "Preferences"));
         /* 別處同名的 mediaserverd 不注入 */
         assert(!fuxi_inject_library(mode, "/var/tmp/mediaserverd", "mediaserverd"));
         assert(!fuxi_inject_library(mode, "/usr/sbin/mediaserverd2", "mediaserverd2"));
@@ -51,7 +56,8 @@ int main(void)
     assert(!fuxi_inject_env(NULL, env, sizeof(env)));
     assert(!fuxi_inject_env(FUXI_INJECT_SB_LIB, env, 10));
     assert(!fuxi_inject_env(FUXI_INJECT_SB_LIB, env, 0));
-    puts("PASS: exec injection modes 0..15: SpringBoard, mediaserverd, opt-in wifid audit and application executables, rejects look-alikes and short buffers");
+    assert(!fuxi_inject_library(16u, "/Applications/Other.app/Preferences", "Preferences"));
+    puts("PASS: exec injection modes 0..31, exact Settings executable, other app modes and environment bounds");
     return 0;
 }
 '''

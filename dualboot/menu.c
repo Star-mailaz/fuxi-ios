@@ -24,6 +24,7 @@ enum menu_action menu_update(struct menu *m, enum menu_event event, unsigned ela
     } else if (!m->interacted && m->remaining_ms) {
         if (elapsed_ms >= m->remaining_ms) {
             m->remaining_ms = 0;
+            m->os = MENU_ANDROID;
             m->action = MENU_BOOT_ANDROID;
             return m->action;
         }

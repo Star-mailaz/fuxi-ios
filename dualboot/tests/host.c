@@ -52,6 +52,7 @@ static void test_menu(void)
     menu_init(&m, MENU_IOS, 10000);
     CHECK(menu_update(&m, MENU_NONE, 9999) == MENU_WAIT);
     CHECK(menu_update(&m, MENU_NONE, 1) == MENU_BOOT_ANDROID);
+    CHECK(m.os == MENU_ANDROID);
     menu_init(&m, MENU_IOS, 10000);
     CHECK(menu_update(&m, MENU_DOWN, 10000) == MENU_WAIT && m.interacted);
     menu_update(&m, MENU_CONFIRM, 0);
@@ -272,7 +273,7 @@ static void test_render(const char *directory)
     size_t n = (size_t)stride * h;
     uint32_t *p = malloc((n + 2) * sizeof(*p)); CHECK(p);
     for (size_t i = 0; i < n + 2; ++i) p[i] = 0x12345678;
-    struct menu m; menu_init(&m, MENU_ANDROID, 0);
+    struct menu m; menu_init(&m, MENU_ANDROID, 10000);
     CHECK(!menu_draw(&m, p + 1, w, h, stride, n - stride, 0));
     CHECK(!menu_draw(&m, p + 1, w, h, w - 1, n, 0));
     CHECK(menu_draw(&m, p + 1, w, h, stride, n, 0));
@@ -314,11 +315,20 @@ static void test_partial_render(void)
     menu_init(&m, MENU_ANDROID, 8000);
     CHECK(menu_paint(&state, &m, frame, w, h, stride, n, 0));
     CHECK(!menu_paint(&state, &m, frame, w, h, stride, n, 0));
+    CHECK(state.countdown_seconds == 8);
+    CHECK(menu_update(&m, MENU_NONE, 999) == MENU_WAIT);
+    CHECK(!menu_paint(&state, &m, frame, w, h, stride, n, 0));
+    CHECK(menu_update(&m, MENU_NONE, 1) == MENU_WAIT);
+    CHECK(menu_paint(&state, &m, frame, w, h, stride, n, 0));
+    CHECK(state.countdown_seconds == 7);
+    CHECK(menu_draw(&m, fresh, w, h, stride, n, 0));
+    CHECK(memcmp(frame, fresh, n * sizeof(*frame)) == 0);
     size_t title = 220u * stride + 250, label = 487u * stride + 270;
     uint32_t original_title = frame[title], original_label = frame[label];
     frame[title] = frame[label] = 0x12345678;
     menu_update(&m, MENU_DOWN, 0);  /* Focus and countdown changes. */
     CHECK(menu_paint(&state, &m, frame, w, h, stride, n, 0));
+    CHECK(state.countdown_seconds == 0);
     CHECK(frame[title] == 0x12345678 && frame[label] == 0x12345678);
     frame[title] = original_title;
     frame[label] = original_label;

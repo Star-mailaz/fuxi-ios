@@ -1767,7 +1767,7 @@
 +#endif
 --- /dev/null
 +++ b/bsd/dev/fuxi_wifi_ios.c
-@@ -0,0 +1,223 @@
+@@ -0,0 +1,225 @@
 +/* Fuxi Wi-Fi iOS shim entry and synthetic Ethernet link. No radio access. */
 +#if defined(FUXI)
 +#include <sys/param.h>
@@ -1807,6 +1807,8 @@
 +};
 +static const struct fuxi_wifi_input input = {
 +	.rx_frame = fuxi_wifi_net_input, .link_state = fuxi_wifi_net_link_state,
++	.rx_packet = fuxi_wifi_net_input_packet, .rx_flush = fuxi_wifi_net_flush_rx,
++	.byte_counts = fuxi_wifi_net_byte_counts,
 +};
 +
 +bool
@@ -1993,7 +1995,7 @@
 +#endif /* FUXI */
 --- /dev/null
 +++ b/bsd/sys/fuxi_wifi_ios.h
-@@ -0,0 +1,37 @@
+@@ -0,0 +1,42 @@
 +/* Fuxi Wi-Fi iOS shim: boot-lifetime backend boundary. */
 +#ifndef FUXI_WIFI_IOS_H
 +#define FUXI_WIFI_IOS_H
@@ -2009,6 +2011,11 @@
 +struct fuxi_wifi_input {
 +	void (*rx_frame)(const uint8_t *frame, size_t length);
 +	void (*link_state)(bool up);
++	/* A synchronous reader for borrowed fragments. End each worker batch with rx_flush. */
++	void (*rx_packet)(void *packet, size_t length,
++	    int (*read)(void *, size_t, void *, size_t));
++	void (*rx_flush)(void);
++	bool (*byte_counts)(uint64_t *received, uint64_t *sent);
 +};
 +
 +/* One immutable backend for the boot. No detach/hot replacement. Station
@@ -2033,7 +2040,7 @@
 +#endif
 --- /dev/null
 +++ b/bsd/dev/fuxi_wifi_net.c
-@@ -0,0 +1,268 @@
+@@ -0,0 +1,333 @@
 +/*
 + * Ported from HackiOS xnu/files/bsd/dev/redwood_net.c (APSL-2.0)
 + * Fuxi adaptations, 2026-10-23: opt-in iOS shim; see docs-lanes/wifi-ios.md.
@@ -2081,6 +2088,19 @@
 +static const struct fuxi_wifi_net_link *net_link;
 +static bool net_link_up;
 +static ifnet_t net_ifp;
++/* The WLAN worker owns this list. Follow Sheng's WifiNet.cpp and hand input a bounded packet list. */
++static mbuf_t rx_head, rx_tail;
++static struct ifnet_stat_increment_param rx_pending;
++
++static void
++net_rx_header(mbuf_t packet)
++{
++	char *header = mbuf_data(packet);
++	mbuf_pkthdr_setrcvif(packet, net_ifp);
++	mbuf_pkthdr_setheader(packet, header);
++	mbuf_adj(packet, ETHER_HDR_LEN);
++	bpf_tap_in(net_ifp, DLT_EN10MB, packet, header, ETHER_HDR_LEN);
++}
 +
 +/* ---- the interface -------------------------------------------------------------------------------- */
 +
@@ -2113,7 +2133,6 @@
 +	struct ifnet_stat_increment_param stats = { .packets_in = 1, .bytes_in = (uint32_t)length };
 +	unsigned int chunks = 1;
 +	mbuf_t packet = NULL;
-+	char *header;
 +
 +	if (net_ifp == NULL || !__atomic_load_n(&net_link_up, __ATOMIC_ACQUIRE) || length < ETHER_HDR_LEN || length > FUXI_WIFI_NET_FRAME_MAX ||
 +	    mbuf_allocpacket(MBUF_DONTWAIT, length, &chunks, &packet) != 0) {
@@ -2124,12 +2143,65 @@
 +		return;
 +	}
 +	/* as every Ethernet driver hands a frame up: the header noted and stepped over */
-+	header = mbuf_data(packet);
-+	mbuf_pkthdr_setrcvif(packet, net_ifp);
-+	mbuf_pkthdr_setheader(packet, header);
-+	mbuf_adj(packet, ETHER_HDR_LEN);
-+	bpf_tap_in(net_ifp, DLT_EN10MB, packet, header, ETHER_HDR_LEN);
++	net_rx_header(packet);
 +	ifnet_input(net_ifp, packet, &stats);
++}
++
++void
++fuxi_wifi_net_flush_rx(void)
++{
++	mbuf_t packets = rx_head;
++	if (packets == NULL) { return; }
++	struct ifnet_stat_increment_param stats = rx_pending;
++	rx_head = rx_tail = NULL;
++	memset(&rx_pending, 0, sizeof(rx_pending));
++	if (__atomic_load_n(&net_link_up, __ATOMIC_ACQUIRE)) {
++		ifnet_input(net_ifp, packets, &stats);
++	} else {
++		mbuf_freem_list(packets);
++	}
++}
++
++void
++fuxi_wifi_net_input_packet(void *source, size_t length,
++    int (*read)(void *, size_t, void *, size_t))
++{
++	/* Align the IP header after the 14-byte Ethernet header. One cluster holds each supported frame. */
++	const size_t padding = 2;
++	unsigned int chunks = 1;
++	mbuf_t packet = NULL;
++	if (net_ifp == NULL || !__atomic_load_n(&net_link_up, __ATOMIC_ACQUIRE) || read == NULL ||
++	    length < ETHER_HDR_LEN || length > FUXI_WIFI_NET_FRAME_MAX ||
++	    mbuf_allocpacket(MBUF_DONTWAIT, length + padding, &chunks, &packet) != 0) {
++		return;
++	}
++	if (chunks != 1 || mbuf_setdata(packet, (char *)mbuf_data(packet) + padding, length) != 0 ||
++	    read(source, 0, mbuf_data(packet), length) != 0) {
++		mbuf_freem(packet);
++		return;
++	}
++	mbuf_pkthdr_setlen(packet, length);
++	net_rx_header(packet);
++	mbuf_setnextpkt(packet, NULL);
++	if (rx_tail != NULL) {
++		mbuf_setnextpkt(rx_tail, packet);
++	} else {
++		rx_head = packet;
++	}
++	rx_tail = packet;
++	rx_pending.packets_in++;
++	rx_pending.bytes_in += (uint32_t)length;
++	if (rx_pending.packets_in == 64) { fuxi_wifi_net_flush_rx(); }
++}
++
++bool
++fuxi_wifi_net_byte_counts(uint64_t *received, uint64_t *sent)
++{
++	struct ifnet_stats_param stats;
++	if (net_ifp == NULL || ifnet_stat(net_ifp, &stats) != 0) { return false; }
++	*received = stats.bytes_in;
++	*sent = stats.bytes_out;
++	return true;
 +}
 +
 +static unsigned net_ioctls_said;
@@ -2304,7 +2376,7 @@
 +#endif /* FUXI */
 --- /dev/null
 +++ b/bsd/sys/fuxi_wifi_net.h
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,65 @@
 +/*
 + * Ported from HackiOS xnu/files/bsd/sys/redwood_net.h (APSL-2.0)
 + * Fuxi adaptations, 2026-10-23: opt-in iOS shim; see docs-lanes/wifi-ios.md.
@@ -2357,6 +2429,11 @@
 +bool fuxi_wifi_net_attach(const struct fuxi_wifi_net_link *link);
 +/* A frame has arrived. Copied; the buffer is the caller's again on return. */
 +void fuxi_wifi_net_input(const uint8_t *frame, size_t length);
++/* Only the ath12k worker calls these. Read the borrowed packet before returning. */
++void fuxi_wifi_net_input_packet(void *source, size_t length,
++    int (*read)(void *, size_t, void *, size_t));
++void fuxi_wifi_net_flush_rx(void);
++bool fuxi_wifi_net_byte_counts(uint64_t *received, uint64_t *sent);
 +/* Frames can pass now / can no longer pass. */
 +void fuxi_wifi_net_link_state(bool up);
 +
@@ -2367,7 +2444,7 @@
 +#endif /* _SYS_FUXI_WIFI_NET_H_ */
 --- /dev/null
 +++ b/bsd/dev/fuxi_wifi_sta.c
-@@ -0,0 +1,422 @@
+@@ -0,0 +1,443 @@
 +/*
 + * Ported from HackiOS xnu/files/bsd/dev/redwood_sta.c (APSL-2.0)
 + * Fuxi adaptations, 2026-10-23: opt-in iOS shim; see docs-lanes/wifi-ios.md.
@@ -2428,6 +2505,8 @@
 +
 +/* what has been asked for and not begun */
 +static bool asked_power, asked_power_on, asked_scan, asked_join, asked_leave;
++/* OFF must reach the radio even if a later ON was queued while a scan/join owned the worker. */
++static bool power_off_pending;
 +static struct fuxi_wifi_sta_scan asked_scan_what;
 +static struct fuxi_wifi_sta_join asked_join_what;
 +
@@ -2467,8 +2546,9 @@
 +		/* one thing at a time, in the order that makes sense when several wait */
 +		if (asked_power) {
 +			power = true;
-+			power_on = asked_power_on;
-+			asked_power = false;
++			power_on = asked_power_on && !power_off_pending;
++			asked_power = power_on != asked_power_on;
++			power_off_pending = false;
 +			power_running = true;
 +			power_running_on = power_on;
 +		} else if (asked_leave) {
@@ -2608,7 +2688,13 @@
 +static bool
 +power_wanted(bool *on)
 +{
-+	if (!(fuxi_wifi_ux() & FUXI_WIFI_UX_POWER_ASKED)) {
++	unsigned ux = fuxi_wifi_ux();
++	if (power_off_pending || (power_running && !power_running_on &&
++	    (ux & FUXI_WIFI_UX_POWER_OFF_FIRST))) {
++		*on = false;
++		return true;
++	}
++	if (!(ux & FUXI_WIFI_UX_POWER_ASKED)) {
 +		return false;
 +	}
 +	if (asked_power) {
@@ -2633,6 +2719,15 @@
 +	}
 +	lck_mtx_unlock(&sta_lock);
 +	return on;
++}
++
++bool
++fuxi_wifi_sta_power_off_pending(void)
++{
++	lck_mtx_lock(&sta_lock);
++	bool pending = power_off_pending;
++	lck_mtx_unlock(&sta_lock);
++	return pending;
 +}
 +
 +/* 能不能再收掃描／加入：電源是開的或正要開；bit 0 打開時，正要關就不收 */
@@ -2671,6 +2766,9 @@
 +	asked_power = true;
 +	asked_power_on = on;
 +	if (!on) {
++		if (fuxi_wifi_ux() & FUXI_WIFI_UX_POWER_OFF_FIRST) {
++			power_off_pending = true;
++		}
 +		asked_scan = asked_join = asked_leave = false;
 +		bzero(&asked_join_what, sizeof(asked_join_what));
 +	}
@@ -2792,7 +2890,7 @@
 +#endif /* FUXI */
 --- /dev/null
 +++ b/bsd/sys/fuxi_wifi_sta.h
-@@ -0,0 +1,152 @@
+@@ -0,0 +1,159 @@
 +/*
 + * Ported from HackiOS xnu/files/bsd/sys/redwood_sta.h (APSL-2.0)
 + * Fuxi adaptations, 2026-10-23: opt-in iOS shim; see docs-lanes/wifi-ios.md.
@@ -2915,7 +3013,13 @@
 +                                         * COUNTRY_CODE_CHANGED：wifid 收到會清掉掃描快取）；GET 51 回記住的碼 */
 +#define FUXI_WIFI_UX_POWER_SAME   16u      /* 要的電源狀態和現在一樣（例如關被開覆蓋）：不呼叫底層、不清連線，
 +                                         * 只回報電源事件 */
-+#define FUXI_WIFI_UX_ALL          31u
++#define FUXI_WIFI_UX_SCAN_RECOVER 32u      /* keep radio control after a failed or cancelled scan */
++#define FUXI_WIFI_UX_SCAN_CHANNELS 64u     /* implicit scans use the advertised 2.4/5 GHz channel list */
++#define FUXI_WIFI_UX_POWER_OFF_FIRST 128u /* finish an off request before a later enable */
++#define FUXI_WIFI_UX_RX_BATCH    256u      /* receive borrowed ath12k fragments directly into batched mbufs */
++#define FUXI_WIFI_UX_LINK_STATS  512u      /* print cached PHY rate and interface byte counts */
++#define FUXI_WIFI_UX_SCAN_TRACE 1024u      /* log the first ath12k scan events */
++#define FUXI_WIFI_UX_ALL        2047u
 +
 +#ifdef KERNEL
 +/* 讀一次 ADT 之後記住（ADT 開機後不變）；沒有這個屬性或長度不對都當 0 */
@@ -2933,6 +3037,7 @@
 +int      fuxi_wifi_sta_ask_leave(void);
 +bool     fuxi_wifi_sta_busy(void);                                        /* something asked for is not over yet */
 +bool     fuxi_wifi_sta_powered(void);
++bool     fuxi_wifi_sta_power_off_pending(void);
 +/* the `index`th access point the last scan heard: true, or false when there are not that many */
 +bool     fuxi_wifi_sta_heard(unsigned index, struct fuxi_wifi_sta_bss *bss);
 +void     fuxi_wifi_sta_state(struct fuxi_wifi_sta_state *state);

@@ -185,7 +185,7 @@ def main():
     parser.add_argument("--base-chain", type=Path, default=WORKSPACE / "work/boot-chain/chain-v7-ram9g-rtctorch")
     parser.add_argument("--output", type=Path, default=WORKSPACE / "work/dualboot/menu-v1")
     parser.add_argument("--default", choices=("android", "ios"), default="android")
-    parser.add_argument("--timeout", type=int, default=0, help="0 waits; otherwise 1..60 seconds, always defaults to Android")
+    parser.add_argument("--timeout", type=int, default=10, help="Seconds before automatic Android boot (default: 10; 0 waits)")
     parser.add_argument("--wsl", default="Ubuntu-26.04")
     parser.add_argument("--ndk", type=Path, help="Windows NDK bin directory")
     parser.add_argument("--host-only", action="store_true")

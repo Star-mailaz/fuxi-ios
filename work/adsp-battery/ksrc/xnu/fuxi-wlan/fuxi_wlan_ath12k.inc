@@ -8,6 +8,7 @@
 static struct fwa_arena wla_pool;
 static struct fwa_block *wla_blocks;
 static unsigned wla_express, wla_msi, wla_failed;
+static unsigned wla_scan_log_remaining;
 static struct {
 	const char *name, *file;
 	void *memory;
@@ -242,7 +243,14 @@ wla_poll(void)
 static void
 wla_log(int level, const char *line)
 {
-	if (level <= 6 && line) { printf("FUXI ATH12K: %llu %.180s\n", wla_now_ms(), line); }
+	if (!line) { return; }
+	if (level > 6) {
+		if (!wla_scan_log_remaining ||
+		    (strncmp(line, "scan event ", sizeof("scan event ") - 1) &&
+		     strncmp(line, "send 11d scan ", sizeof("send 11d scan ") - 1))) { return; }
+		wla_scan_log_remaining--;
+	}
+	printf("FUXI ATH12K: %llu %.180s\n", wla_now_ms(), line);
 }
 
 static void
@@ -260,6 +268,9 @@ extern void _disable_preemption(void);
 extern void _enable_preemption(void);
 
 #if defined(FUXI_ATH12K_LINKED)
+/* The pinned module namespaces Linux exports. See ath12k/debug.h for ATH12K_DBG_WMI. */
+extern unsigned int nwk_ath12k_debug_mask __attribute__((weak_import));
+#define WLA_DBG_WMI 0x00000002u
 static struct fwc_probe wla_control;
 static unsigned wla_control_awake;
 
@@ -360,6 +371,14 @@ wl_ath_run(void)
 	printf("FUXI ATH12K: start from PBL, full BAR, owned 128 MiB DMA, IRQ polling; legacy MHI skipped\n");
 	nw_wifi_irq_mode(0);
 	int error = nw_wifi_start(&platform, &board);
+	bool trace_scan = !error && ios && (fuxi_wifi_ux() & FUXI_WIFI_UX_SCAN_TRACE) && &nwk_ath12k_debug_mask;
+	unsigned int prior_debug_mask = 0;
+	if (trace_scan) {
+		prior_debug_mask = nwk_ath12k_debug_mask;
+		nwk_ath12k_debug_mask = prior_debug_mask | WLA_DBG_WMI;
+		wla_scan_log_remaining = 384;
+		printf("FUXI ATH12K: WMI scan trace enabled\n");
+	}
 	bool attached = false, completed = false;
 	uint64_t started = wla_now_ms(), report = started;
 	unsigned spins = 0;
@@ -368,6 +387,10 @@ wl_ath_run(void)
 		wla_control_awake = 0;
 		/* nonzero while frames move: go round again without sleeping, but not for ever */
 		int moving = nw_wifi_step();
+		if (trace_scan && !wla_scan_log_remaining) {
+			nwk_ath12k_debug_mask = prior_debug_mask;
+			trace_scan = false;
+		}
 		uint64_t now = wla_now_ms();
 		if (!attached && nw_wifi_stats.stage >= 4) {
 			error = nw_wifi_control_attach(ios ? &wli.session : &wla_control.session);
@@ -402,6 +425,10 @@ wl_ath_run(void)
 			spins = 0;
 			wl_sleep(1);
 		}
+	}
+	if (trace_scan) {
+		nwk_ath12k_debug_mask = prior_debug_mask;
+		wla_scan_log_remaining = 0;
 	}
 	if (ios) { wli_fail(error ? error : EIO); }
 	if (!error && wla_control.error) {

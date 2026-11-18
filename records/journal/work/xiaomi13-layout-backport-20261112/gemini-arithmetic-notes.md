@@ -1,0 +1,1 @@
+Portable C++17 header-only block layout arithmetic and test suite implemented under namespace fuxi_layout. All arithmetic uses checked overflow math and validates regions, alignments, spans, and array slices without platform dependencies.

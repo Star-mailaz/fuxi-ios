@@ -140,6 +140,11 @@ static int SecureDTGetProperty(DTEntry entry,const char *name,void const **prop,
 static int mbuf_copydata(mbuf_t p,size_t off,size_t n,void *out) { memcpy(out,(const char *)p+off,n);return 0; }
 static void FuxiNetworkStackStart(void) { registry++; }
 static void fuxi_wifi_net_input(const uint8_t *p,size_t n) { assert(p[12]==0x88 && n>=14); received++; }
+static void fuxi_wifi_net_input_packet(void *source,size_t length,int (*read)(void *,size_t,void *,size_t)) {
+ (void)source;(void)length;(void)read;assert(!"synthetic backend must not use the native packet reader");
+}
+static void fuxi_wifi_net_flush_rx(void) { assert(!"synthetic backend must not batch"); }
+static bool fuxi_wifi_net_byte_counts(uint64_t *rx,uint64_t *tx) { (void)rx;(void)tx;return false; }
 /* link_hold：把 station 執行緒停在後端的電源切換裡（假後端切電源時會先報 link down） */
 static atomic_int link_hold, link_held;
 static void fuxi_wifi_net_link_state(bool up) {
@@ -364,6 +369,18 @@ int main(int argc,char **argv) {
  assert(!fuxi_wifi_sta_powered() && !radio_on());
  power.state[0]=1; assert(!request(true,19,&power,sizeof(power),NULL)); settle();
  assert(fuxi_wifi_sta_powered() && radio_on());
+ /* A later on request must wait for the queued off to reach the backend. */
+ set_ux(FUXI_WIFI_UX_POWER_ASKED|FUXI_WIFI_UX_POWER_SAME|FUXI_WIFI_UX_POWER_OFF_FIRST,4);
+ hold_station();
+ unsigned power_events=atomic_load(&events[1]);
+ power.state[0]=0; assert(!request(true,19,&power,sizeof(power),NULL));
+ power.state[0]=1; assert(!request(true,19,&power,sizeof(power),NULL));
+ assert(fuxi_wifi_sta_power_off_pending() && !said_power() && radio_on());
+ assert(request(true,10,&scan,sizeof(scan),NULL)==ENETDOWN);
+ release_station();
+ assert(!fuxi_wifi_sta_power_off_pending() && said_power() && radio_on());
+ assert(atomic_load(&events[1])==power_events+2);
+ puts("PASS: queued Wi-Fi off is applied before a later on");
  /* bit 3：國家碼。沒開時 SET／GET 照舊拒絕 */
  uint8_t cc8[8]={1,0,0,0,'T','W',' ',0}, got[8], bad[8]={1,0,0,0,'t','w',0,0};
  set_ux(0,4);
@@ -488,16 +505,21 @@ def net_test(directory):
 #define MBUF_DONTWAIT 0
 typedef int errno_t;
 typedef void *ifnet_t;
-typedef struct packet { uint8_t bytes[1514]; size_t offset,len,total;void *header; } *mbuf_t;
+typedef struct packet {
+ uint8_t bytes[1516]; size_t offset,len,total;void *header;struct packet *nextpkt;
+} *mbuf_t;
 struct ifnet_stat_increment_param { unsigned packets_in,bytes_in; };
-static unsigned freed,inputs,out_packets,out_errors;
+struct ifnet_stats_param { uint64_t bytes_in,bytes_out; };
+static unsigned freed,inputs,input_calls,out_packets,out_errors;
+static struct ifnet_stats_param interface_stats;
 static bool fail_alloc,fail_copy,accept;
-static size_t expected_length;
+static size_t expected_length,expected_padding;
 static size_t mbuf_pkthdr_len(mbuf_t m) { return m->total; }
 static void mbuf_freem(mbuf_t m) { freed++;free(m); }
 static void ifnet_stat_increment_out(ifnet_t p,unsigned n,unsigned bytes,unsigned errors) {
- assert(p);(void)bytes;out_packets+=n;out_errors+=errors;
+ assert(p);interface_stats.bytes_out+=bytes;out_packets+=n;out_errors+=errors;
 }
+static int ifnet_stat(ifnet_t p,struct ifnet_stats_param *s) { assert(p);*s=interface_stats;return 0; }
 static int mbuf_allocpacket(int flags,size_t n,unsigned *chunks,mbuf_t *out) {
  (void)flags;(void)chunks;if(fail_alloc)return 1;
  *out=calloc(1,sizeof(**out));(*out)->len=(*out)->total=n;return 0;
@@ -506,23 +528,44 @@ static int mbuf_copyback(mbuf_t m,size_t off,size_t n,const void *p,int flags) {
  (void)flags;if(fail_copy)return 1;assert(off+n<=sizeof(m->bytes));memcpy(m->bytes+off,p,n);return 0;
 }
 static void *mbuf_data(mbuf_t m) { return m->bytes+m->offset; }
+static int mbuf_setdata(mbuf_t m,void *data,size_t len) {
+ size_t offset=(uint8_t *)data-m->bytes;
+ if (offset>sizeof(m->bytes) || len>sizeof(m->bytes)-offset) return 1;
+ m->offset=offset;m->len=len;return 0;
+}
+static void mbuf_pkthdr_setlen(mbuf_t m,size_t len) { m->total=len; }
+static void mbuf_setnextpkt(mbuf_t m,mbuf_t next) { m->nextpkt=next; }
+static int mbuf_freem_list(mbuf_t m) {
+ int count=0;
+ while(m) { mbuf_t next=m->nextpkt;mbuf_freem(m);m=next;count++; }
+ return count;
+}
 static void mbuf_pkthdr_setrcvif(mbuf_t m,ifnet_t p) { (void)m;assert(p); }
 static void mbuf_pkthdr_setheader(mbuf_t m,void *p) { m->header=p; }
 static void mbuf_adj(mbuf_t m,int n) { m->offset+=n;m->len-=n;m->total-=n; }
 static void bpf_tap_in(ifnet_t p,int type,mbuf_t m,void *header,int n) {
- assert(p && type==1 && n==14 && header==m->bytes && m->header==header);
- assert(m->offset==14 && m->total==expected_length-14 && m->len==m->total);
+ assert(p && type==1 && n==14 && header==m->bytes+expected_padding && m->header==header);
+ assert(m->offset==expected_padding+14 && m->total==expected_length-14 && m->len==m->total);
 }
 static void bpf_tap_out(ifnet_t p,int type,mbuf_t m,void *h,int n) {
  assert(p && type==1 && !h && !n && m->offset==0);
 }
 static int ifnet_input(ifnet_t p,mbuf_t m,struct ifnet_stat_increment_param *stats) {
- assert(p && stats->packets_in==1 && stats->bytes_in==expected_length);
- assert(m->bytes[12]==0x88 && m->bytes[13]==0xb5);inputs++;mbuf_freem(m);return 0;
+ assert(p && stats->packets_in && stats->bytes_in==stats->packets_in*expected_length);
+ for (mbuf_t packet=m;packet;packet=packet->nextpkt) {
+  assert(packet->bytes[12+expected_padding]==0x88 && packet->bytes[13+expected_padding]==0xb5);
+ }
+ input_calls++;interface_stats.bytes_in+=stats->bytes_in;
+ assert((unsigned)mbuf_freem_list(m)==stats->packets_in);inputs+=stats->packets_in;return 0;
 }
 '''
     test = r'''
 static bool send_frame(mbuf_t m,size_t n) { assert(m->total==n);return accept; }
+static int read_frame(void *source,size_t offset,void *dest,size_t n) {
+ assert(!offset && n==expected_length);
+ if (fail_copy) return 1;
+ memcpy(dest,source,n);return 0;
+}
 int main(void) {
  static const struct fuxi_wifi_net_link driver={.transmit=send_frame};
  net_link=&driver;net_ifp=(void *)1;
@@ -541,6 +584,25 @@ int main(void) {
  packet=calloc(1,sizeof(*packet));packet->len=packet->total=60;
  net_link_up=false;assert(net_output(net_ifp,packet)==0 && out_errors==2);
  assert(freed==6);
+ expected_padding=2; expected_length=1514;
+ fuxi_wifi_net_input_packet(frame,1514,read_frame); assert(!rx_head);
+ net_link_up=true;
+ fuxi_wifi_net_input_packet(frame,1515,read_frame); assert(!rx_head);
+ fail_copy=true; fuxi_wifi_net_input_packet(frame,1514,read_frame);
+ assert(!rx_head && freed==7); fail_copy=false;
+ for (unsigned i=0;i<63;i++) fuxi_wifi_net_input_packet(frame,1514,read_frame);
+ assert(input_calls==2 && rx_pending.packets_in==63);
+ fuxi_wifi_net_input_packet(frame,1514,read_frame);
+ assert(input_calls==3 && inputs==66 && !rx_head && !rx_tail);
+ fuxi_wifi_net_input_packet(frame,1514,read_frame);
+ fuxi_wifi_net_flush_rx(); fuxi_wifi_net_flush_rx();
+ assert(input_calls==4 && inputs==67);
+ fuxi_wifi_net_input_packet(frame,1514,read_frame);
+ net_link_up=false; fuxi_wifi_net_flush_rx();
+ assert(input_calls==4 && !rx_head && !rx_pending.bytes_in && freed==73);
+ uint64_t rx=0,tx=0;
+ assert(fuxi_wifi_net_byte_counts(&rx,&tx) && rx==60+66*1514 && tx==60);
+ puts("PASS: aligned borrowed RX, bounded batches, error and link-down ownership");
  puts("PASS: production ifnet TX/RX bounds, mbuf ownership, header adjustment and failures");
 }
 '''

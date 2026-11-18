@@ -139,13 +139,14 @@ uintptr_t chain_select(uintptr_t fdt)
     menu_keys_init(&keys);
     dualboot_report[1] = 3;
     draw(&screen, &m, 0);
-    uint64_t previous = counter(), hz = frequency();
+    uint64_t started = counter(), previous_ms = 0, hz = frequency();
     int input_error = 0;
     for (;;) {
         delay_us(0, 10000);
-        uint64_t now = counter(), ms64 = (now - previous) / (hz / 1000u ? hz / 1000u : 1u);
-        unsigned ms = ms64 > 1000u ? 1000u : (unsigned)ms64;
-        previous = now;
+        uint64_t now_ms = (counter() - started) * 1000u / hz;
+        uint64_t elapsed_ms = now_ms - previous_ms;
+        unsigned ms = elapsed_ms > UINT32_MAX ? UINT32_MAX : (unsigned)elapsed_ms;
+        previous_ms = now_ms;
         unsigned mask;
         if (!menu_spmi_keys(&spmi, &mask)) {
             menu_keys_init(&keys);
@@ -183,6 +184,8 @@ uintptr_t chain_select(uintptr_t fdt)
             m.action = MENU_WAIT;
             m.interacted = 1; m.remaining_ms = 0;
             draw(&screen, &m, "無法執行，請重試");
-        } else if (event != MENU_NONE) draw(&screen, &m, 0);
+        } else if (event != MENU_NONE || m.remaining_ms || screen.countdown_seconds) {
+            draw(&screen, &m, 0);
+        }
     }
 }

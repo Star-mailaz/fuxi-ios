@@ -70,6 +70,7 @@ extern int nw_wifi_control_attach(uint64_t *);
 extern int nw_wifi_control_receive(uint64_t, size_t, int (*)(void *, void *, size_t), void *);
 extern int nw_wifi_start(const struct lx_platform *, const struct nw_board *);
 extern int nw_wifi_step(void);
+extern void nw_wifi_link_state(char *, int);
 extern void nw_wifi_stop(void);
 extern void nw_wifi_poll(void);
 extern void nw_wifi_irq_mode(int);

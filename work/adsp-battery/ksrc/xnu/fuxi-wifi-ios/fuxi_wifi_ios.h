@@ -13,6 +13,11 @@
 struct fuxi_wifi_input {
 	void (*rx_frame)(const uint8_t *frame, size_t length);
 	void (*link_state)(bool up);
+	/* A synchronous reader for borrowed fragments. End each worker batch with rx_flush. */
+	void (*rx_packet)(void *packet, size_t length,
+	    int (*read)(void *, size_t, void *, size_t));
+	void (*rx_flush)(void);
+	bool (*byte_counts)(uint64_t *received, uint64_t *sent);
 };
 
 /* One immutable backend for the boot. No detach/hot replacement. Station

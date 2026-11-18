@@ -1,0 +1,252 @@
+# 補丁對照
+
+> 本檔由 `records/tools/build-catalog.py` 產生，請勿手改；改 `records/map.tsv` 或紀錄項目後重新產生。
+
+iOS 16 核心依補丁名稱排序。XNU 27 與 libpthread 依各自的 series。使用者空間依各建置工具。涵蓋工作區、harness、ksrc 的已追蹤補丁。
+
+| 補丁 | 來源 | 狀態 | 行數 | 新增開機參數 | 新增 ADT 屬性 | 紀錄 |
+|---|---|---|---|---|---|---|
+| `ksrc:tools/patches/mesa-fuxi-cached-coherent.patch` | ios-fuxi／本機 | 上游原樣 | 75 |  |  | [S-118](../items/S-upstream.zh-TW.md#s-118-上游-nativemetalmetal2vulkan-與-mesa-建置補丁) |
+| `ksrc:tools/patches/mesa-fuxi-fence-wait-100ms.patch` | ios-fuxi／本機 | 上游原樣 | 23 |  |  | [S-118](../items/S-upstream.zh-TW.md#s-118-上游-nativemetalmetal2vulkan-與-mesa-建置補丁) |
+| `ksrc:tools/patches/mesa-fuxi-hostimport.patch` | ios-fuxi／本機 | 本機修改 +12／−0 | 119 |  |  | [K-070](../items/K-kernel.zh-TW.md#k-070-nativeadreno-host-import-配額失敗回報-vulkan-oom)、[S-118](../items/S-upstream.zh-TW.md#s-118-上游-nativemetalmetal2vulkan-與-mesa-建置補丁) |
+| `ksrc:tools/patches/mesa-fuxi-ir3-round-default.patch` | ios-fuxi／本機 | 上游原樣 | 48 |  |  | [S-118](../items/S-upstream.zh-TW.md#s-118-上游-nativemetalmetal2vulkan-與-mesa-建置補丁) |
+| `ksrc:tools/patches/mesa-fuxi-smoke.patch` | ios-fuxi／本機 | 上游原樣 | 40 |  |  | [S-118](../items/S-upstream.zh-TW.md#s-118-上游-nativemetalmetal2vulkan-與-mesa-建置補丁) |
+| `ksrc:tools/patches/metal2vulkan-adrenometal-0009-keep-final-pass.patch` | ios-fuxi／本機 | 上游原樣 | 170 |  |  | [S-118](../items/S-upstream.zh-TW.md#s-118-上游-nativemetalmetal2vulkan-與-mesa-建置補丁) |
+| `ksrc:tools/patches/metal2vulkan-adrenometal-0010-fewer-allocations-per-draw.patch` | ios-fuxi／本機 | 上游原樣 | 589 |  |  | [S-118](../items/S-upstream.zh-TW.md#s-118-上游-nativemetalmetal2vulkan-與-mesa-建置補丁) |
+| `ksrc:tools/patches/metal2vulkan-adrenometal-0011-keep-draw-commands.patch` | ios-fuxi／本機 | 上游原樣 | 376 |  |  | [S-118](../items/S-upstream.zh-TW.md#s-118-上游-nativemetalmetal2vulkan-與-mesa-建置補丁) |
+| `ksrc:tools/patches/metal2vulkan-adrenometal-0012-keep-draw-lists.patch` | ios-fuxi／本機 | 上游原樣 | 332 |  |  | [S-118](../items/S-upstream.zh-TW.md#s-118-上游-nativemetalmetal2vulkan-與-mesa-建置補丁) |
+| `ksrc:tools/patches/metal2vulkan-adrenometal-0013-skip-unchanged-rebinds.patch` | ios-fuxi／本機 | 上游原樣 | 420 |  |  | [S-118](../items/S-upstream.zh-TW.md#s-118-上游-nativemetalmetal2vulkan-與-mesa-建置補丁) |
+| `ksrc:tools/patches/metal2vulkan-adrenometal-0014-map-tracker-keys.patch` | ios-fuxi／本機 | 上游原樣 | 96 |  |  | [S-118](../items/S-upstream.zh-TW.md#s-118-上游-nativemetalmetal2vulkan-與-mesa-建置補丁) |
+| `ksrc:tools/patches/metal2vulkan-adrenometal-0015-two-plane-shadow-as-memory-lies.patch` | ios-fuxi／本機 | 上游原樣 | 72 |  |  | [S-118](../items/S-upstream.zh-TW.md#s-118-上游-nativemetalmetal2vulkan-與-mesa-建置補丁) |
+| `ksrc:tools/patches/nativemetal-fuxi-0001-ios16-plugin.patch` | ios-fuxi／本機 | 上游原樣 | 551 |  |  | [S-118](../items/S-upstream.zh-TW.md#s-118-上游-nativemetalmetal2vulkan-與-mesa-建置補丁) |
+| `ksrc:tools/patches/nativemetal-fuxi-0002-safety-hooks.patch` | ios-fuxi／本機 | 上游原樣 | 1589 |  |  | [S-118](../items/S-upstream.zh-TW.md#s-118-上游-nativemetalmetal2vulkan-與-mesa-建置補丁) |
+| `ksrc:tools/patches/nativemetal-fuxi-0003-no-production-fixtures.patch` | ios-fuxi／本機 | 上游原樣 | 30 |  |  | [S-118](../items/S-upstream.zh-TW.md#s-118-上游-nativemetalmetal2vulkan-與-mesa-建置補丁) |
+| `ksrc:xnu/patches/0001-new-clang-drop-removed-auto-var-init-flag.patch` | ios-sweet | 上游原樣 | 12 |  |  | [S-001](../items/S-upstream.zh-TW.md#s-001-移除-xcode-16-已刪除的-clang-自動變數初始化旗標) |
+| `ksrc:xnu/patches/0002-new-clang-backport-UIO_STACKBUF.patch` | ios-sweet | 上游原樣 | 391 |  |  | [S-002](../items/S-upstream.zh-TW.md#s-002-為新版-clang-回移植-uio_stackbuf-巨集) |
+| `ksrc:xnu/patches/0003-sweet-framebuffer-serial-console.patch` | ios-sweet | 上游原樣 | 176 |  |  | [S-003](../items/S-upstream.zh-TW.md#s-003-新增-sweet-fbcon-幀緩衝區序列主控台) |
+| `ksrc:xnu/patches/0004-sweet-machine-config.patch` | ios-sweet | 上游原樣 | 318 |  |  | [S-004](../items/S-upstream.zh-TW.md#s-004-新增-sweet-機型組態與-gicv3-group-1-中斷路徑) |
+| `ksrc:xnu/patches/0005-non-pac-build-fixes.patch` | ios-sweet | 上游原樣 | 13 |  |  | [S-005](../items/S-upstream.zh-TW.md#s-005-修正無-pac-且無-rosetta-組態下的-pmap-成員重複定義) |
+| `ksrc:xnu/patches/0006-sweet-master-config-open-source-asm-pmap.patch` | ios-sweet | 上游原樣 | 120 |  |  | [S-006](../items/S-upstream.zh-TW.md#s-006-新增使用開源-arm-asmpmap-的-sweet-master-組態檔) |
+| `ksrc:xnu/patches/0007-sweet-stub-apple-internal-headers.patch` | ios-sweet | 上游原樣 | 88 |  |  | [S-007](../items/S-upstream.zh-TW.md#s-007-為-apple-內部標頭檔tunablessartuat提供空實作佔位並停用-kpckperf) |
+| `ksrc:xnu/patches/0008-sweet-fill-closed-lib-gaps-kpc-stub.patch` | ios-sweet | 上游原樣 | 361 |  |  | [S-008](../items/S-upstream.zh-TW.md#s-008-補齊-sweet-閉源程式庫缺口與-kpc-空後端) |
+| `ksrc:xnu/patches/0009-sweet-drop-apple-soc-only-exports.patch` | ios-sweet | 上游原樣 | 74 |  |  | [S-009](../items/S-upstream.zh-TW.md#s-009-移除僅限-apple-soc-的-kpi-匯出符號) |
+| `ksrc:xnu/patches/0010-sweet-early-framebuffer-debug.patch` | ios-sweet | 上游原樣 | 344 |  |  | [S-010](../items/S-upstream.zh-TW.md#s-010-新增開機早期幀緩衝區除錯標記與早期-panic-主控台) |
+| `ksrc:xnu/patches/0011-sweet-physmap-alignment-padding.patch` | ios-sweet | 上游原樣 | 45 |  |  | [S-011](../items/S-upstream.zh-TW.md#s-011-為大記憶體非-ppl-核心預留-physmap-區塊對齊填充空間) |
+| `ksrc:xnu/patches/0012-sweet-keep-debug-console-after-ttbr0.patch` | ios-sweet | 上游原樣 | 233 |  |  | [S-012](../items/S-upstream.zh-TW.md#s-012-在-ttbr0-撤除後保留幀緩衝區除錯主控台) |
+| `ksrc:xnu/patches/0013-sweet-kmem-rng-without-corecrypto.patch` | ios-sweet | 上游原樣 | 97 |  |  | [S-013](../items/S-upstream.zh-TW.md#s-013-在無-corecrypto-下為-kmem-配置器提供每-cpu-亂數產生器) |
+| `ksrc:xnu/patches/0014-sweet-kernel-hmac-prng.patch` | ios-sweet | 上游原樣 | 292 |  |  | [S-014](../items/S-upstream.zh-TW.md#s-014-註冊-sweet-內建-hmac-sha256-核心-prng) |
+| `ksrc:xnu/patches/0015-sweet-unavailable-trust-cache-runtime.patch` | ios-sweet | 上游原樣 | 93 |  |  | [S-015](../items/S-upstream.zh-TW.md#s-015-明確呈現-sweet-缺少-trust-cache-服務的狀態) |
+| `ksrc:xnu/patches/0016-sweet-device-tree-platform-expert.patch` | ios-sweet | 上游原樣 | 119 |  |  | [S-016](../items/S-upstream.zh-TW.md#s-016-新增-sweet-內建裝置樹-platform-expert) |
+| `ksrc:xnu/patches/0017-sweet-device-tree-virtual-timer-irq.patch` | ios-sweet | 上游原樣 | 81 |  |  | [S-017](../items/S-upstream.zh-TW.md#s-017-從裝置樹選擇虛擬計時器-ppi-中斷編號支援-qemu) |
+| `ksrc:xnu/patches/0018-sweet-boot-cpu-driver.patch` | ios-sweet | 上游原樣 | 201 |  |  | [S-018](../items/S-upstream.zh-TW.md#s-018-註冊-sweet-開機-cpu-並驗證-gic-sgi-傳遞) |
+| `ksrc:xnu/patches/0019-sweet-builtin-pthread.patch` | ios-sweet | 上游原樣 | 129 |  |  | [S-019](../items/S-upstream.zh-TW.md#s-019-整合相符的開源-libpthread-核心提供者) |
+| `ksrc:xnu/patches/0020-sweet-portable-aes-cbc.patch` | ios-sweet | 上游原樣 | 258 |  |  | [S-020](../items/S-upstream.zh-TW.md#s-020-整合-bearssl-可攜式常數時間-aes-cbcecb-至傳統加密-api) |
+| `ksrc:xnu/patches/0021-sweet-mockfs-ramdisk-root.patch` | ios-sweet | 上游原樣 | 54 |  |  | [S-021](../items/S-upstream.zh-TW.md#s-021-透過-mockfs-啟動-ram-disk-根檔案系統) |
+| `ksrc:xnu/patches/0022-sweet-ramdisk-root-without-iomedia.patch` | ios-sweet | 上游原樣 | 27 |  |  | [S-022](../items/S-upstream.zh-TW.md#s-022-允許在無-iostoragefamily--iomedia-下執行-publishhiddenmedia) |
+| `ksrc:xnu/patches/0023-sweet-builtin-sha256-for-libkern.patch` | ios-sweet | 上游原樣 | 59 |  |  | [S-023](../items/S-upstream.zh-TW.md#s-023-將-sweet-的-libkern-sha-256-導向內建實作) |
+| `ksrc:xnu/patches/0024-sweet-mockfs-virtual-ramdisk-io.patch` | ios-sweet | 上游原樣 | 30 |  |  | [S-024](../items/S-upstream.zh-TW.md#s-024-修正-mockfs-透過裝置-io-讀取虛擬-ram-disk) |
+| `ksrc:xnu/patches/0025-sweet-builtin-amfi-no-entitlements.patch` | ios-sweet | 上游原樣 | 192 |  |  | [S-025](../items/S-upstream.zh-TW.md#s-025-註冊-sweet-內建無-entitlements-的-amfi-介面) |
+| `ksrc:xnu/patches/0026-sweet-builtin-hfs.patch` | ios-sweet | 上游原樣 | 351 | `hfs_corruption_panics` |  | [S-026](../items/S-upstream.zh-TW.md#s-026-將-apple-開源-hfs-內建至-sweet-核心) |
+| `ksrc:xnu/patches/0027-sweet-bearssl-md5.patch` | ios-sweet | 上游原樣 | 131 |  |  | [S-027](../items/S-upstream.zh-TW.md#s-027-使用-bearssl-提供-md5-以支援-hfs-卷宗-uuid) |
+| `ksrc:xnu/patches/0028-sweet-ufs-root-device.patch` | ios-sweet | 上游原樣 | 580 | `ufsroot` |  | [S-028](../items/S-upstream.zh-TW.md#s-028-新增-sweet-內部-ufs-唯讀根裝置驅動ufsroot0) |
+| `ksrc:xnu/patches/0029-sweet-unsealed-root-volume.patch` | ios-sweet | 上游原樣 | 24 |  |  | [S-029](../items/S-upstream.zh-TW.md#s-029-允許-sweet-在未驗證未密封的根卷宗下繼續開機) |
+| `ksrc:xnu/patches/0030-sweet-ufs-writes.patch` | ios-sweet | 上游原樣 | 224 | `ufsrw` |  | [S-030](../items/S-upstream.zh-TW.md#s-030-新增由開機參數-ufsrw1-控制的-ufs-寫入支援) |
+| `ksrc:xnu/patches/0031-sweet-read-write-root.patch` | ios-sweet | 上游原樣 | 46 | `rootrw` |  | [S-031](../items/S-upstream.zh-TW.md#s-031-新增開機參數-rootrw1-並允許掛載非日誌髒-hfs-根卷宗) |
+| `ksrc:xnu/patches/0032-sweet-bearssl-sha1.patch` | ios-sweet | 上游原樣 | 125 |  |  | [S-032](../items/S-upstream.zh-TW.md#s-032-使用-bearssl-提供傳統-sha1-api-以修復-ipv6-lo0-掛載崩潰) |
+| `ksrc:xnu/patches/0033-sweet-bearssl-sha384-sha512.patch` | ios-sweet | 上游原樣 | 125 |  |  | [S-033](../items/S-upstream.zh-TW.md#s-033-使用-bearssl-提供-sha-384sha-512-api) |
+| `ksrc:xnu/patches/0034-sweet-ufs-dma-above-4g.patch` | ios-sweet | 上游原樣 | 43 |  |  | [S-034](../items/S-upstream.zh-TW.md#s-034-保護-ufs-dma-在高記憶體4g下檢查-64-bit-定址能力) |
+| `ksrc:xnu/patches/0035-sweet-amfi-entitlements-platform-binaries.patch` | ios-sweet | 上游原樣 | 477 |  |  | [S-035](../items/S-upstream.zh-TW.md#s-035-在-sweet-內建-amfi-中加入-xml-entitlements-剖析與-platform-binary-標記) |
+| `ksrc:xnu/patches/0036-sweet-amfi-cs-signed.patch` | ios-sweet | 上游原樣 | 26 |  |  | [S-036](../items/S-upstream.zh-TW.md#s-036-sweet-amfi-為通過驗證的簽章標記-cs_signed) |
+| `ksrc:xnu/patches/0037-sweet-config-bindfs.patch` | ios-sweet | 上游原樣 | 11 |  |  | [S-037](../items/S-upstream.zh-TW.md#s-037-在-sweet-核心組態啟用-bindfs) |
+| `ksrc:xnu/patches/0038-sweet-applekeystore.patch` | ios-sweet | 本機修改 +100／−1 | 350 |  |  | [S-038](../items/S-upstream.zh-TW.md#s-038-新增-sweet-內建-applekeystore無密碼已解鎖與鑰匙圈金鑰封裝) |
+| `ksrc:xnu/patches/0039-sweet-coredump-default-off.patch` | ios-sweet | 上游原樣 | 24 |  |  | [S-039](../items/S-upstream.zh-TW.md#s-039-將-sweet-的-coredump-預設設為關閉) |
+| `ksrc:xnu/patches/0040-sweet-iowatchdog.patch` | ios-sweet | 上游原樣 | 118 |  |  | [S-040](../items/S-upstream.zh-TW.md#s-040-新增-sweet-內建-iowatchdog-服務並上限化-hfs-連結修復紀錄) |
+| `ksrc:xnu/patches/0041-sweet-hfs-link-notes.patch` | ios-sweet | 上游原樣 | 55 |  |  | [S-041](../items/S-upstream.zh-TW.md#s-041-限制-hfs-硬連結修復訊息輸出次數) |
+| `ksrc:xnu/patches/0042-sweet-short-exec-log.patch` | ios-sweet | 上游原樣 | 17 |  |  | [S-042](../items/S-upstream.zh-TW.md#s-042-精簡-sweet-上每次-ios-exec-的-console-紀錄為單行) |
+| `ksrc:xnu/patches/0043-sweet-console-crash-log.patch` | ios-sweet | 上游原樣 | 105 |  |  | [S-043](../items/S-upstream.zh-TW.md#s-043-在-console-印出-sweet-行程崩潰報告並實作-aks-selector-103) |
+| `ksrc:xnu/patches/0044-sweet-crash-log-reason.patch` | ios-sweet | 上游原樣 | 16 |  |  | [S-044](../items/S-upstream.zh-TW.md#s-044-在-console-崩潰報告印出-exit-reason-文字) |
+| `ksrc:xnu/patches/0045-sweet-iowatchdog-pmu-primary.patch` | ios-sweet | 上游原樣 | 40 |  |  | [S-045](../items/S-upstream.zh-TW.md#s-045-在-iowatchdog-上標記-iopmuprimary-以通過-watchdogd-的-pmu-階段檢查) |
+| `ksrc:xnu/patches/0046-sweet-iosurface-iomfb.patch` | ios-sweet | 本機修改 +4／−1 | 1452 | `sweetfb_noconsole` |  | [S-046](../items/S-upstream.zh-TW.md#s-046-實作-sweet-內建-iosurface-與-iomobileframebuffercpu-顯示路徑) |
+| `ksrc:xnu/patches/0047-sweet-persistent-console-log.patch` | ios-sweet | 上游原樣 | 157 | `sweetlog` |  | [S-047](../items/S-upstream.zh-TW.md#s-047-新增-userdata-尾端持續性-console-紀錄環sweetlog) |
+| `ksrc:xnu/patches/0048-sweet-devnull-tee.patch` | ios-sweet | 上游原樣 | 70 | `sweetnull` |  | [S-048](../items/S-upstream.zh-TW.md#s-048-將指定-daemon-寫入-devnull-的輸出側錄至-consolesweetnull) |
+| `ksrc:xnu/patches/0049-sweet-iokit-trace.patch` | ios-sweet | 上游原樣 | 167 | `sweetiolog` |  | [S-049](../items/S-upstream.zh-TW.md#s-049-追蹤指定行程的-iokit-查詢與配對呼叫sweetiolog) |
+| `ksrc:xnu/patches/0050-sweet-sandbox-policy.patch` | ios-sweet | 上游原樣 | 66 |  |  | [S-050](../items/S-upstream.zh-TW.md#s-050-新增寬鬆的-sweet-內建-sandbox-mac-政策) |
+| `ksrc:xnu/patches/0051-sweet-crash-heap-strings.patch` | ios-sweet | 上游原樣 | 114 | `sweetscan` |  | [S-051](../items/S-upstream.zh-TW.md#s-051-行程-sigabrt-崩潰時掃描並印出-malloc-heap-可列印字串sweetscan) |
+| `ksrc:xnu/patches/0052-sweet-hfs-rename-swap.patch` | ios-sweet | 上游原樣 | 23 |  |  | [S-052](../items/S-upstream.zh-TW.md#s-052-在-hfs-上以-vnop_exchange-模擬-rename_swap) |
+| `ksrc:xnu/patches/0053-sweet-crash-scan-springboard.patch` | ios-sweet | 上游原樣 | 30 |  |  | [S-053](../items/S-upstream.zh-TW.md#s-053-將-heap-字串掃描擴充至-springboard-與-sigtrap) |
+| `ksrc:xnu/patches/0054-sweet-process-sampler.patch` | ios-sweet | 上游原樣 | 219 | `sweetsample` |  | [S-054](../items/S-upstream.zh-TW.md#s-054-新增使用者空間行程抽樣器swap-計數器並追蹤-springboard-iokit) |
+| `ksrc:xnu/patches/0055-sweet-aks-ext-state-sampler-depth.patch` | ios-sweet | 上游原樣 | 72 |  |  | [S-055](../items/S-upstream.zh-TW.md#s-055-實作-aks-selector-35101-並加深行程抽樣器深度與次數) |
+| `ksrc:xnu/patches/0056-sweet-fb-throttled-present.patch` | ios-sweet | 上游原樣 | 82 | `sweetfb_hz` |  | [S-056](../items/S-upstream.zh-TW.md#s-056-將-sweetframebuffer-swap-改由-vsync-計時器以-10-hz-節流呈現) |
+| `ksrc:xnu/patches/0057-sweet-no-ext-resolver.patch` | ios-sweet | 上游原樣 | 11 |  |  | [S-057](../items/S-upstream.zh-TW.md#s-057-停用外部身分解析器config_ext_resolver使-ios-acl-生效) |
+| `ksrc:xnu/patches/0058-sweet-hid-event-services.patch` | ios-sweet | 上游原樣 | 21309 | `hidq_force_usage_pair` `hidq_no_full_msg` `hidq_size` `sweethidtest` |  | [S-058](../items/S-upstream.zh-TW.md#s-058-新增-iohidfamily-19151403-hid-事件服務按鍵與觸控) |
+| `ksrc:xnu/patches/0059-sweet-iphone-identity.patch` | ios-sweet | 上游原樣 | 53 |  |  | [S-059](../items/S-upstream.zh-TW.md#s-059-從-adt-讀取-hwmachinehwmodel-以呈現-iphone-x-裝置身分) |
+| `ksrc:xnu/patches/0060-sweet-keys-touch-drivers.patch` | ios-sweet | 上游原樣 | 788 | `sweetkeys` `sweettouch` `sweettouchdelay` `sweettouchirq` |  | [S-060](../items/S-upstream.zh-TW.md#s-060-新增輪詢式電源音量鍵spmi與觸控geni-i2c驅動) |
+| `ksrc:xnu/patches/0061-sweet-iphone-x-display-size.patch` | ios-sweet | 上游原樣 | 124 | `sweetfb_native` |  | [S-061](../items/S-upstream.zh-TW.md#s-061-將顯示畫面與觸控座標呈現為-iphone-x1125x2436) |
+| `ksrc:xnu/patches/0062-sweet-touch-power-battery.patch` | ios-sweet | 上游原樣 | 938 | `sweetbattery` |  | [S-062](../items/S-upstream.zh-TW.md#s-062-新增觸控電源軌-rpmh-投票l11c與-iopmpowersource-電池服務) |
+| `ksrc:xnu/patches/0063-sweet-goodix-geni-packing.patch` | ios-sweet | 上游原樣 | 310 |  |  | [S-063](../items/S-upstream.zh-TW.md#s-063-修正-geni-i2c-fifo-packing-與-gt9896yellowstone協定) |
+| `ksrc:xnu/patches/0064-sweet-priv-work-interval.patch` | ios-sweet | 上游原樣 | 57 |  |  | [S-064](../items/S-upstream.zh-TW.md#s-064-在-sweet-sandbox-政策中授予-priv_work_interval-權限) |
+| `ksrc:xnu/patches/0065-sweet-smp-psci.patch` | ios-sweet | 上游原樣 | 415 | `cpus` |  | [S-065](../items/S-upstream.zh-TW.md#s-065-以-psci-cpu_on-啟動-a55-次要核心cpus26) |
+| `ksrc:xnu/patches/0066-sweet-crash-fault-region.patch` | ios-sweet | 上游原樣 | 28 |  |  | [S-066](../items/S-upstream.zh-TW.md#s-066-在崩潰報告印出錯誤位址所屬的-vm-映射區段) |
+| `ksrc:xnu/patches/0067-sweet-console-mute.patch` | ios-sweet | 上游原樣 | 56 |  |  | [S-067](../items/S-upstream.zh-TW.md#s-067-將-sweetfb_noconsole-改為靜音螢幕主控台旗標而非切換到序列埠) |
+| `ksrc:xnu/patches/0068-sweet-surface-lookup-cached.patch` | ios-sweet | 上游原樣 | 64 |  |  | [S-068](../items/S-upstream.zh-TW.md#s-068-重複查詢已映射的-iosurface-時回傳基底位址--1) |
+| `ksrc:xnu/patches/0069-sweet-ufs-faster.patch` | ios-sweet | 上游原樣 | 181 | `ufscache` `ufslogsecs` `ufswait` |  | [S-069](../items/S-upstream.zh-TW.md#s-069-將-sweetlog-刷寫週期改為-10-秒並新增選配-ufs-快取與等待調校) |
+| `ksrc:xnu/patches/0070-sweet-pid-hibernate.patch` | ios-sweet | 上游原樣 | 36 |  |  | [S-070](../items/S-upstream.zh-TW.md#s-070-在-sweet-啟用-pid_hibernate-系統呼叫修復-springboard-退回桌面崩潰) |
+| `ksrc:xnu/patches/0071-sweet-touch-edge.patch` | ios-sweet | 上游原樣 | 55 |  |  | [S-071](../items/S-upstream.zh-TW.md#s-071-為螢幕邊緣起始的觸控標記-fromedgetip-位元) |
+| `ksrc:xnu/patches/0072-sweet-usb-probe.patch` | ios-sweet | 上游原樣 | 139 | `sweetusb` |  | [S-072](../items/S-upstream.zh-TW.md#s-072-新增唯讀-usb-狀態探測dwc3--qusb2--gcc) |
+| `ksrc:xnu/patches/0073-sweet-usb-device-ep0.patch` | ios-sweet | 上游原樣 | 427 |  |  | [S-073](../items/S-upstream.zh-TW.md#s-073-新增-usb-裝置模式與-endpoint-0-列舉sweetusb2) |
+| `ksrc:xnu/patches/0074-sweet-usb-vbus-override.patch` | ios-sweet | 上游原樣 | 41 |  |  | [S-074](../items/S-upstream.zh-TW.md#s-074-在-qualcomm-usb-wrapper-強制啟用-vbus-session-valid) |
+| `ksrc:xnu/patches/0075-sweet-usb-ecm.patch` | ios-sweet | 上游原樣 | 457 |  |  | [S-075](../items/S-upstream.zh-TW.md#s-075-新增-usb-乙太網路cdc-ecm與-ue0-網路介面1921687224) |
+| `ksrc:xnu/patches/0076-sweet-usb-rx-mbuf.patch` | ios-sweet | 上游原樣 | 24 |  |  | [S-076](../items/S-upstream.zh-TW.md#s-076-修正-usb-乙太網路收包使用單一-2-kib-cluster-mbuf) |
+| `ksrc:xnu/patches/0077-sweet-usb-live-log.patch` | ios-sweet | 上游原樣 | 107 | `sweetusblog` |  | [S-077](../items/S-upstream.zh-TW.md#s-077-透過-usb-乙太網路即時串流-console-logudp-至-192168715140) |
+| `ksrc:xnu/patches/0078-sweet-smp-8-cores.patch` | ios-sweet | 上游原樣 | 53 |  |  | [S-078](../items/S-upstream.zh-TW.md#s-078-啟用全部八顆核心六顆-a55--兩顆-a76cpus8) |
+| `ksrc:xnu/patches/0079-sweet-display-power.patch` | ios-sweet | 上游原樣 | 78 |  |  | [S-079](../items/S-upstream.zh-TW.md#s-079-實作-iomfb-requestpowerchange0-漸暗息屏與恢復顯示) |
+| `ksrc:xnu/patches/0080-sweet-net-trace.patch` | ios-sweet | 上游原樣 | 51 |  |  | [S-080](../items/S-upstream.zh-TW.md#s-080-記錄-ipv4-路由與位址變更sweet-net-追蹤) |
+| `ksrc:xnu/patches/0081-sweet-usb-link-state.patch` | ios-sweet | 上游原樣 | 71 |  |  | [S-081](../items/S-upstream.zh-TW.md#s-081-讓-ue0-回報作用中的乙太網路連結狀態siocgifmedia-與-kev_dl_link_on) |
+| `ksrc:xnu/patches/0082-fuxi-ram-bringup.patch` | ios-fuxi／本機 | 上游原樣 | 388 |  |  | [S-082](../items/S-upstream.zh-TW.md#s-082-建立小米-13fuxiram-only-開機與顯示移植目標) |
+| `ksrc:xnu/patches/0083-fuxi-native-monitor-diagnostics.patch` | ios-fuxi／本機 | 上游原樣 | 132 |  |  | [S-083](../items/S-upstream.zh-TW.md#s-083-獨立原生-usb-監看器診斷通道啟動至-ram-root-pid-1) |
+| `ksrc:xnu/patches/0084-fuxi-readonly-ufs-probe.patch` | ios-fuxi／本機 | 上游原樣 | 123 | `fuxi_ufs_probe` |  | [S-084](../items/S-upstream.zh-TW.md#s-084-fuxi-唯讀-ufs-交接探測與時脈ahb-驗證fuxi_ufs_probe) |
+| `ksrc:xnu/patches/0085-fuxi-ufs-sense-diagnostics.patch` | ios-fuxi／本機 | 上游原樣 | 16 |  |  | [S-085](../items/S-upstream.zh-TW.md#s-085-診斷-fuxi-ufs-check-condition-原始回應封包) |
+| `ksrc:xnu/patches/0086-fuxi-ufs-active-power.patch` | ios-fuxi／本機 | 上游原樣 | 31 |  |  | [S-086](../items/S-upstream.zh-TW.md#s-086-在唯讀-io-前發送精確的-ufs-device-wlun-active-電源指令) |
+| `ksrc:xnu/patches/0087-fuxi-display-autorefresh.patch` | ios-fuxi／本機 | 上游原樣 | 31 |  |  | [S-087](../items/S-upstream.zh-TW.md#s-087-當-abl-autorefresh-開啟時略過手動-ctl0-start-以避免-dsc-損毀) |
+| `ksrc:xnu/patches/0088-fuxi-extent-root.patch` | ios-fuxi／本機 | 上游原樣 | 200 |  |  | [S-088](../items/S-upstream.zh-TW.md#s-088-將-fuxi-ufs-根裝置限制在-userdata-內預先釘選的單一-data-檔案extent-mapped) |
+| `ksrc:xnu/patches/0089-fuxi-stack-sampler.patch` | ios-fuxi／本機 | 上游原樣 | 20 | `sweetsample` |  | [S-089](../items/S-upstream.zh-TW.md#s-089-在-fuxi-上於指定-sweetsample-時啟動使用者空間堆疊抽樣器) |
+| `ksrc:xnu/patches/0090-fuxi-smp-seven-cores.patch` | ios-fuxi／本機 | 上游原樣 | 24 |  |  | [S-090](../items/S-upstream.zh-TW.md#s-090-將-fuxi-smp-上限設為-7-核保留-cpu100-給-usb-監看器) |
+| `ksrc:xnu/patches/0091-fuxi-touch-fts-spi.patch` | ios-fuxi／本機 | 本機修改 +1／−1 | 629 | `fuxitouch` `fuxitouchdelay` |  | [S-091](../items/S-upstream.zh-TW.md#s-091-新增-fuxi-st-ftsftm5spi-觸控驅動透過-qup1-se4-gpi-dma) |
+| `ksrc:xnu/patches/0092-fuxi-buttons.patch` | ios-fuxi／本機 | 上游原樣 | 323 | `fuxikeys` `fuxikeys_gpiocfg` |  | [S-092](../items/S-upstream.zh-TW.md#s-092-新增-fuxi-電源音量鍵驅動spmi-arbiter-v7-唯讀輪詢) |
+| `ksrc:xnu/patches/0093-fuxi-touch-display-polish.patch` | ios-fuxi／本機 | 本機修改 +1／−1 | 502 | `fuxitouch_idle_us` `fuxitouch_offsuppress` `fuxitouch_poll_us` |  | [S-093](../items/S-upstream.zh-TW.md#s-093-優化-fuxi-60-hz-顯示呈現與-4-ms-自適應觸控輪詢) |
+| `ksrc:xnu/patches/0095-sweet-noexec-bootarg.patch` | ios-fuxi／本機 | 上游原樣 | 60 | `sweetnoexec` |  | [S-095](../items/S-upstream.zh-TW.md#s-095-新增-sweetnoexec-開機參數以拒絕重試循環-daemon-的-exec) |
+| `ksrc:xnu/patches/0096-fuxi-adreno.patch` | ios-fuxi／本機 | 上游原樣 | 3289 | `fuxigpu` `fuxigpu_fail` `fuxigpu_stage` |  | [S-096](../items/S-upstream.zh-TW.md#s-096-整合-adreno-a740-gpu-冷啟動pas13-韌體載入與非同步-2d-呈現fuxigpu) |
+| `ksrc:xnu/patches/0097-fuxi-touch-boost.patch` | ios-fuxi／本機 | 本機修改 +44／−11 | 1042 | `fuxicompileboost` `fuxicores` `fuxiperf` `fuxitp` |  | [S-097](../items/S-upstream.zh-TW.md#s-097-實作-fuxi-觸控編譯-cpu-加速推薦核心遮罩與熱壓力橋接fuxiperffuxitpfuxicores) |
+| `ksrc:xnu/patches/0098-fuxi-native-adreno-abi.patch` | ios-fuxi／本機 | 本機修改 +515／−6 | 7127 | `fuxiearly` `fuxigpuabi` `fuxigpuclock` `fuxigpuddr` `fuxigpulevel` `fuxigpuncimport` `fuxipanel120` `fuxiscancpuflip` `fuxiscandouble` `fuxiscandrain` `fuxiscante` `fuxiscantriple` |  | [S-098](../items/S-upstream.zh-TW.md#s-098-實作-nativeadreno-v2-使用者空間-gpu-abi時脈ddr-dcvs-與掃描輸出最佳化) |
+| `ksrc:xnu/patches/0099-fuxi-wlan.patch` | ios-fuxi／本機 | 本機修改 +2852／−14 | 8739 | `fuxiwifiios` `fuxiwifitest` `fuxiwifitestssid` `fuxiwlan` `fuxiwlanaspm` `fuxiwlanath` `fuxiwlanbatch` `fuxiwlanbdf` `fuxiwlancache` `fuxiwlancap` `fuxiwlanclk` `fuxiwlandwell` `fuxiwlaniboff` `fuxiwlanicc` `fuxiwlaniccbw` `fuxiwlankeep` `fuxiwlanmlo` `fuxiwlanoldiova` `fuxiwlanprobe` `fuxiwlanqrtr` `fuxiwlanrails` `fuxiwlanseq` `fuxiwlanstop22` `fuxiwlanw15` `fuxiwlanw16` `fuxiwlanw18` |  | [S-099](../items/S-upstream.zh-TW.md#s-099-實作-wcn7850-pcie0mhibhi-探索qmi-wlfw-帶起與原生-ath12k-wi-fi-ios-站台橋接fuxiwlan) |
+| `ksrc:xnu/patches/0100-sweet-execswap-gpu-abi-trace.patch` | ios-fuxi／本機 | 上游原樣 | 1041 | `fuxigpuwaitus` `sweetexecswap` |  | [S-100](../items/S-upstream.zh-TW.md#s-100-實作受閘控執行路徑代換測試路由與-nativeadreno-abi-效能除錯追蹤sweetexecswap) |
+| `ksrc:xnu/patches/0101-fuxi-gpu-nc-cache-sync.patch` | ios-fuxi／本機 | 上游原樣 | 22 |  |  | [S-101](../items/S-upstream.zh-TW.md#s-101-修復-4-gib-以上實體位址進行-gpu-bo-快取同步時的截斷問題) |
+| `ksrc:xnu/patches/0102-fuxi-gpu-backboardd-open.patch` | ios-fuxi／本機 | 上游原樣 | 46 | `fuxibbgpu` |  | [S-102](../items/S-upstream.zh-TW.md#s-102-允許-backboardd-在指定開機參數下開啟-nativeadreno-user-clientfuxibbgpu) |
+| `ksrc:xnu/patches/0103-fuxi-kernel-h1.patch` | ios-fuxi／本機 | 本機修改 +109／−30 | 2389 | `fuxiautolock` `fuxikeyinject` `fuxikeyscript` `fuxikeyscriptn` `fuxirtc` `fuxirtcoffset` `fuxitapcmd` `fuxitaps` `fuxitapsloop` `fuxitaptowake` `fuxitbatch` `fuxitouchscript` `fuxitouchscriptn` `fuxitour` `fuxitoura` `fuxitourg` `fuxitourhold` | `fuxi,rtc-offset` `fuxi,tapcmd` | [S-103](../items/S-upstream.zh-TW.md#s-103-實作-fuxi-h1-amfi-相容層按鍵仲裁注入自動鎖屏ui-腳本導覽與-pmk8550-rtc-校時) |
+| `ksrc:xnu/patches/0104-fuxi-wifi-ios.patch` | ios-fuxi／本機 | 本機修改 +558／−37 | 3650 | `fuxiwifiios` `fuxiwifitrace` | `fuxi,wifi-rssi` `fuxi,wifi-ux` | [S-104](../items/S-upstream.zh-TW.md#s-104-實作-ios-apple80211ionetworkstack-wi-fi-模擬與原生-wcn7850-站台對接層fuxiwifiios) |
+| `ksrc:xnu/patches/0105-fuxi-idle.patch` | ios-fuxi／本機 | 上游原樣 | 934 | `fuxicpuload` `fuxinoidleflush` `fuxinosleep` `fuxixpcid` |  | [S-105](../items/S-upstream.zh-TW.md#s-105-實作-cpu-負載ipiidle-l1-快取清理診斷禁用系統睡眠與-xpcproxy-身份保留fuxicpuloadfuxinosleepfuxixpcidfuxinoidleflush) |
+| `ksrc:xnu/patches/0106-fuxi-unixnu.patch` | ios-fuxi／本機 | 本機修改 +396／−42 | 2583 | `fuxi_unixnu_diff` `fuxi_unixnu_idlefb` `fuxi_unixnu_ufs` `fuxibacklight` `fuxiearly` `fuxifbprio` `fuxigpuncimport` `fuxigpuscanout` `fuxigpuscanoutcheck` `fuxigpuscanoutlog` `fuxilog` `fuxipanel120` `fuxipresent` `fuxiuniondir` `fuxivsyncte` `fuxivsynctoff` `sweetfb_hz` `sweetfb_noconsole` `ufslogsecs` | `fuxi,log` `fuxi,refresh-mhz` `fuxi,swap-hist` | [S-106](../items/S-upstream.zh-TW.md#s-106-整合-unixnu-顯示ufs-安全策略120-hz-te-同步掃描輸出追蹤與-mtdblk-獨立紀錄fx_log) |
+| `ksrc:xnu/patches/0107-fuxi-sys.patch` | ios-fuxi／本機 | 上游原樣 | 254 |  |  | [S-107](../items/S-upstream.zh-TW.md#s-107-實作依-entitlement-授權特權與無容器程序-sandbox-路徑回應fuxiprivsfuxisbpath) |
+| `ksrc:xnu/patches/0108-fuxi-gpu-scanout.patch` | ios-fuxi／本機 | 本機修改 +10／−10 | 652 | `sweetsurfrow` |  | [S-108](../items/S-upstream.zh-TW.md#s-108-實作-sweetsurface-scanout-租約管理列對齊zero-copy-調查與-dpu-stage-3-直接掃描sweetsurfrow) |
+| `ksrc:xnu/patches/0109-fuxi-backlight.patch` | ios-fuxi／本機 | 本機修改 +295／−2 | 701 | `fuxibacklight` `fuxibacklighttrace` |  | [S-109](../items/S-upstream.zh-TW.md#s-109-實作-applearmbacklight-服務與-dcs-0x51-螢幕亮度控制fuxibacklight) |
+| `ksrc:xnu/patches/0110-fuxi-union-lower-directory.patch` | ios-fuxi／本機 | 上游原樣 | 26 |  |  | [S-110](../items/S-upstream.zh-TW.md#s-110-移植-unixnu-union-lower-directory-查找資格修正fuxiuniondir) |
+| `ksrc:xnu/patches/0111-fuxi-user-profiler.patch` | ios-fuxi／本機 | 本機修改 +198／−4 | 444 | `sweetprof` `sweetprofname` |  | [S-111](../items/S-upstream.zh-TW.md#s-111-實作可選使用者空間程序堆疊ipi-即時取樣剖析器sweetprof) |
+| `ksrc:xnu/patches/0112-fuxi-registry-trace.patch` | ios-fuxi／本機 | 上游原樣 | 352 | `fuxiregtrace` |  | [S-112](../items/S-upstream.zh-TW.md#s-112-實作-backboardd-ioregistry-查詢與-work-interval-耗時追蹤fuxiregtrace) |
+| `ksrc:xnu/patches/0113-fuxi-audio.patch` | ios-fuxi／本機 | 上游原樣 | 738 |  |  | [S-113](../items/S-upstream.zh-TW.md#s-113-移植音訊-gpraudioreach-封包編碼與共用-rsc-active-tcs-仲裁器基礎p-au1) |
+| `ksrc:xnu/patches/0114-fuxi-pac-probe.patch` | ios-fuxi／本機 | 上游原樣 | 942 | `fuxigpuncimport` |  | [S-114](../items/S-upstream.zh-TW.md#s-114-實作全核心-el1-pac-指針驗證硬體自我測試fuxigpuncimport-bit-25) |
+| `ksrc:xnu/patches/0115-fuxi-arm64e.patch` | ios-fuxi／本機 | 上游原樣 | 315 |  |  | [S-115](../items/S-upstream.zh-TW.md#s-115-實作實驗性原生-arm64e-核心建置與開機金鑰初始化fuxi_arm64e1) |
+| `ksrc:xnu/patches/0116-fuxi-arm64e-user-jop.patch` | ios-fuxi／本機 | 上游原樣 | 67 | `fuxiarm64e` |  | [S-116](../items/S-upstream.zh-TW.md#s-116-調整-arm64e-核心下-fat-binary-評分以停用-user-jop-避免-fpac-panicfuxiarm64e) |
+| `ksrc:xnu/patches/0117-fuxi-adsp.patch` | ios-fuxi／本機 | 本機新增 | 10285 | `fuxiadsp` `fuxiamp` `fuxiaudiospf` `fuxibatpause` `fuxibatpausedelay` `fuxibatttl` `fuxibt` `fuxihaptic` `fuxipmic` `fuxiwlan` | `fuxi,adsp` `fuxi,adsp-wlan` `fuxi,amp` `fuxi,audio-spf` `fuxi,bt` `fuxi,haptic` `fuxi,pmic` `fuxi,ramtest` `fuxi,torchaudit` | [K-001](../items/K-kernel.zh-TW.md#k-001-adsp-開機與-glink-電池讀值) |
+| `ksrc:xnu/patches/0118-fuxi-exec-inject.patch` | ios-fuxi／本機 | 本機新增 | 181 | `fxinj` | `fuxi,inject` | [K-020](../items/K-kernel.zh-TW.md#k-020-核心在-exec-時注入函式庫fxinj補丁-0118) |
+| `ksrc:xnu/patches/0119-sweet-quiet-boot.patch` | ios-fuxi／本機 | 本機新增 | 60 | `sweetfb_noconsole` |  | [K-065](../items/K-kernel.zh-TW.md#k-065-安靜開機不畫-console-跑馬燈) |
+| `ksrc:xnu/patches/0121-fuxi-adt-wifi-args.patch` | ios-fuxi／本機 | 本機新增 | 81 |  | `fuxi,args` | [K-067](../items/K-kernel.zh-TW.md#k-067-國家碼相同電源狀態不重做計時adt-fuxiargsbit-34補丁-0121) |
+| `ksrc:xnu/variants/ath12k-link.patch` | 本機（變體） | 本機新增 | 29 |  |  | [K-050](../items/K-kernel.zh-TW.md#k-050-ath12k-模組連結與-ci) |
+| `ksrc:xnu/variants/ram9g.patch` | 本機（變體） | 本機新增 | 22 |  |  | [K-021](../items/K-kernel.zh-TW.md#k-021-9-gib-ram-配置ram9g-變體) |
+| `ksrc:xnu27/libpthread/explicit-kernel-address.patch` | ios-fuxi／本機 | 上游原樣 | 120 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/fuxi/0001-machine-config.patch` | ios-fuxi／本機 | 上游原樣 | 212 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/fuxi/0002-builtin-crypto.patch` | ios-fuxi／本機 | 上游原樣 | 391 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/fuxi/0003-console.patch` | ios-fuxi／本機 | 上游原樣 | 580 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/fuxi/0004-components.patch` | ios-fuxi／本機 | 上游原樣 | 13 |  |  | [E-029](../items/E-early.zh-TW.md#e-029-xnu-12377-顯示管線缺口盤點與假-apple-logo-移除)、[S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/fuxi/0005-crypto-kext-handoff.patch` | ios-fuxi／本機 | 上游原樣 | 80 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/fuxi/0006-log-ring-fileset.patch` | ios-fuxi／本機 | 上游原樣 | 20 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/fuxi/0007-root27-storage.patch` | ios-fuxi／本機 | 上游原樣 | 1177 | `fuxi_root27` `fuxi_root27_hiderootfs` `fuxi_root27_hint` `fuxi_root27_kmount` `fuxi_root27_nomockfs` `fuxi_root27_norootauth` `fuxi_root27_rwmedia` |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/fuxi/0008-dada-apfs.patch` | ios-fuxi／本機 | 上游原樣 | 17739 | `apfs_cheap` `apfs_meta_cluster` `apfs_par` `apfs_root_c` `apfs_root_v` `apfs_round` `apfs_ubc_read` |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/fuxi/0009-cryptex-graft.patch` | ios-fuxi／本機 | 上游原樣 | 348 | `fuxi_root27_cryptex` |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/fuxi/0010-proc-log.patch` | ios-fuxi／本機 | 上游原樣 | 71 | `fuxi_proc_log` |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/fuxi/0011-pid1-watch.patch` | ios-fuxi／本機 | 上游原樣 | 121 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/fuxi/0012-pid1-fcntl-log.patch` | ios-fuxi／本機 | 上游原樣 | 79 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/fuxi/0013-native4k-progress.patch` | ios-fuxi／本機 | 上游原樣 | 54 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/fuxi/0014-apfs-nocache-read.patch` | ios-fuxi／本機 | 上游原樣 | 21 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/fuxi/0015-user-pac-fail-log.patch` | ios-fuxi／本機 | 上游原樣 | 39 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/fuxi/0016-pac-fail-slot.patch` | ios-fuxi／本機 | 上游原樣 | 23 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/fuxi/0017-native-pac-default-jop-pid.patch` | ios-fuxi／本機 | 上游原樣 | 19 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/fuxi/0018-launchd-ramdisk-bootargs.patch` | ios-fuxi／本機 | 上游原樣 | 26 | `fuxi_launchd_ramdisk` |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/fuxi/0019-spawn-nosys-log.patch` | ios-fuxi／本機 | 上游原樣 | 69 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/fuxi/0020-pid1-signal-backtrace.patch` | ios-fuxi／本機 | 上游原樣 | 82 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/sheng/sheng-cpu-mmu.patch` | ios-fuxi／本機 | 上游原樣 | 614 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/sheng/sheng-kernel-stack-shift.patch` | ios-fuxi／本機 | 上游原樣 | 42 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/sm8550/native-smp-secondary-start.patch` | ios-fuxi／本機 | 上游原樣 | 20 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/apple-only-core-type.patch` | ios-fuxi／本機 | 上游原樣 | 22 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/apple-only-cpu-tunables.patch` | ios-fuxi／本機 | 上游原樣 | 28 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/arm64e-threaded-starts.patch` | ios-fuxi／本機 | 上游原樣 | 21 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/armvirt-platform-personality.patch` | ios-fuxi／本機 | 上游原樣 | 28 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/bcm2837-machine-config.patch` | ios-fuxi／本機 | 上游原樣 | 244 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/cxx-flag-dependencies.patch` | ios-fuxi／本機 | 上游原樣 | 104 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/darwin26-kpi.patch` | ios-fuxi／本機 | 上游原樣 | 549 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/darwin26-shared-region.patch` | ios-fuxi／本機 | 上游原樣 | 29 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/darwin26-syscalls.patch` | ios-fuxi／本機 | 上游原樣 | 476 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/external-archive-dependencies.patch` | ios-fuxi／本機 | 上游原樣 | 14 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/fileset-unmapped-call.patch` | ios-fuxi／本機 | 上游原樣 | 19 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/kernel-sdk-root.patch` | ios-fuxi／本機 | 上游原樣 | 25 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/local-availability.patch` | ios-fuxi／本機 | 上游原樣 | 13 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/mockfs-intermediate-lookup.patch` | ios-fuxi／本機 | 上游原樣 | 13 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/mockfs-memory-device-width.patch` | ios-fuxi／本機 | 上游原樣 | 18 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/mockfs-statfs.patch` | ios-fuxi／本機 | 上游原樣 | 39 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/mockfs-test-file.patch` | ios-fuxi／本機 | 上游原樣 | 280 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/mockfs-typed-allocation.patch` | ios-fuxi／本機 | 上游原樣 | 22 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/native-4k-block-split.patch` | ios-fuxi／本機 | 上游原樣 | 23 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/native-4k-bootstrap-capacity.patch` | ios-fuxi／本機 | 上游原樣 | 67 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/native-4k-shared-region-slide.patch` | ios-fuxi／本機 | 上游原樣 | 391 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/native-4k-signature-hash-cache.patch` | ios-fuxi／本機 | 上游原樣 | 277 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/native-4k-user-abi.patch` | ios-fuxi／本機 | 上游原樣 | 85 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/native-aes-personality.patch` | ios-fuxi／本機 | 上游原樣 | 53 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/native-arm-pan.patch` | ios-fuxi／本機 | 上游原樣 | 16 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/native-dt-panic-region.patch` | ios-fuxi／本機 | 上游原樣 | 44 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/native-lookup-trace.patch` | ios-fuxi／本機 | 上游原樣 | 52 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/native-pac-keys.patch` | ios-fuxi／本機 | 上游原樣 | 134 |  |  | [S-115](../items/S-upstream.zh-TW.md#s-115-實作實驗性原生-arm64e-核心建置與開機金鑰初始化fuxi_arm64e1)、[S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/native-priv-work-interval.patch` | ios-fuxi／本機 | 上游原樣 | 21 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/native-quiet-managed-page-report.patch` | ios-fuxi／本機 | 上游原樣 | 24 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/native-security-init.patch` | ios-fuxi／本機 | 上游原樣 | 88 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/native-text-fixup.patch` | ios-fuxi／本機 | 上游原樣 | 218 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/native-union-getattrlistbulk.patch` | ios-fuxi／本機 | 上游原樣 | 67 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/native-union-lower-directory.patch` | ios-fuxi／本機 | 上游原樣 | 22 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/native-work-interval-instance.patch` | ios-fuxi／本機 | 上游原樣 | 25 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/native-work-interval-soft-fail.patch` | ios-fuxi／本機 | 上游原樣 | 23 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/native-work-interval-trace.patch` | ios-fuxi／本機 | 上游原樣 | 43 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/no-apple-cpu-counters.patch` | ios-fuxi／本機 | 上游原樣 | 30 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/non-apple-cache-monitor.patch` | ios-fuxi／本機 | 上游原樣 | 29 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/non-apple-iommu-bootstrap.patch` | ios-fuxi／本機 | 上游原樣 | 34 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/null-root-media.patch` | ios-fuxi／本機 | 上游原樣 | 27 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/optional-kernel-support-archive.patch` | ios-fuxi／本機 | 上游原樣 | 17 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/public-entitlements-header.patch` | ios-fuxi／本機 | 上游原樣 | 42 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/public-entitlements-v2-header.patch` | ios-fuxi／本機 | 上游原樣 | 30 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/public-missing-definitions.patch` | ios-fuxi／本機 | 上游原樣 | 34 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/public-pmap-sart.patch` | ios-fuxi／本機 | 上游原樣 | 21 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/public-pmap-without-monitor.patch` | ios-fuxi／本機 | 上游原樣 | 48 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/source-machine-layer.patch` | ios-fuxi／本機 | 上游原樣 | 32 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/source-pthread-bootstrap.patch` | ios-fuxi／本機 | 上游原樣 | 29 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/trustcache-runtime-layout.patch` | ios-fuxi／本機 | 上游原樣 | 23 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `ksrc:xnu27/patches/unixnu/zzx-pmap-sync-64bit-pa.patch` | ios-fuxi／本機 | 上游原樣 | 30 |  |  | [S-117](../items/S-upstream.zh-TW.md#s-117-xnu-27-與-kernel-libpthread-的各層補丁) |
+| `harness:patches/astc-pixel-smoke.patch` | harness | native-metal-check.yml、native-metal-host-tests.yml | 135 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/fuxi-copy-span-builder.patch` | harness | native-metal-check.yml、native-metal-host-tests.yml | 29 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/hw000-preparation.patch` | harness | hw000-preparation.yml | 0 |  |  | [T-053](../items/T-tools.zh-TW.md#t-053-harness-的硬體線-ci) |
+| `harness:patches/kernel-adsp-battery.patch` | harness | hw000-preparation.yml、kernel-adsp-battery.yml、kernel-adsp-ram9g.yml | 56000 | `fuxiadsp` `fuxiamp` `fuxiaudiospf` `fuxibatpause` `fuxibatpausedelay` `fuxibatttl` `fuxibt` `fuxihaptic` `fuxilog` `fuxipmic` `fuxirtcoffset` `fuxitapcmd` `fuxiwifiios` `fuxiwifitest` `fuxiwifitestssid` `fuxiwifitrace` `fuxiwlan` `fuxiwlanath` `fuxiwlanbatch` `fuxiwlancache` `fuxiwlancap` `fuxiwlandwell` `fuxiwlanw18` `fxinj` `sweetbattery` `sweetfb_noconsole` `sweetprofname` `ufslogsecs` | `fuxi,adsp` `fuxi,adsp-wlan` `fuxi,amp` `fuxi,args` `fuxi,audio-spf` `fuxi,bt` `fuxi,haptic` `fuxi,inject` `fuxi,log` `fuxi,pmic` `fuxi,ramtest` `fuxi,rtc-offset` `fuxi,tapcmd` `fuxi,torchaudit` `fuxi,wifi-rssi` `fuxi,wifi-ux` | [K-068](../items/K-kernel.zh-TW.md#k-068-限制隱含掃描範圍分組停留失敗已回退) |
+| `harness:patches/kernel-backlight-dsi.patch` | harness | kernel-adsp-battery.yml、kernel-backlight-dsi.yml | 1167 | `fuxibacklight` |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/kernel-bo-slots.patch` | harness | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml | 35 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/kernel-ib-profile.patch` | harness | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml | 561 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/kernel-ibprof-draws.patch` | harness | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml | 271 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/kernel-input-fixes.patch` | harness | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml | 107 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/kernel-perf-governor.patch` | harness | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml | 302 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/kernel-perf-wide.patch` | harness | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml | 75 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/kernel-prof-edges.patch` | harness | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml | 183 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/kernel-prof-inclusive-wait.patch` | harness | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml | 151 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/kernel-prof-inclusive.patch` | harness | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml | 227 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/kernel-prof-live.patch` | harness | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml | 260 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/kernel-surface-stride.patch` | harness | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml、kernel-surface-check.yml | 77 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/kernel-surfrow-mode2.patch` | harness | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml | 86 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/kernel-swipe-pacing.patch` | harness | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml | 44 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/kernel-taps-page1.patch` | harness | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml | 44 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/kernel-taps-page2.patch` | harness | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml | 26 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/kernel-taps-presets.patch` | harness | kernel-adsp-battery.yml、kernel-backlight-dsi.yml、kernel-bo-slots-check.yml | 44 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/metal2vulkan-fuxi-0001-copy-span.patch` | harness | native-metal-check.yml、native-metal-host-tests.yml | 89 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/native-ca-smoke-class.patch` | harness | native-metal-check.yml | 17 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/native-patch-stack.patch` | harness | native-metal-check.yml、native-metal-host-tests.yml | 56 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/native-smoke-class.patch` | harness | native-metal-check.yml | 16 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/nativemetal-fuxi-0004-optional-answers.patch` | harness | native-metal-check.yml、native-metal-host-tests.yml | 37 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/nativemetal-fuxi-0005-completion-handlers.patch` | harness | native-metal-check.yml、native-metal-host-tests.yml | 49 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/nativemetal-fuxi-0006-uchar3-constant.patch` | harness | native-metal-check.yml、native-metal-host-tests.yml | 21 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/nativemetal-fuxi-0007-nocopy-diagnostics.patch` | harness | native-metal-check.yml、native-metal-host-tests.yml | 22 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/nativemetal-fuxi-0008-nocopy-callers.patch` | harness | native-metal-check.yml、native-metal-host-tests.yml | 24 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/nativemetal-fuxi-0009-copy-span.patch` | harness | native-metal-check.yml、native-metal-host-tests.yml | 99 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `harness:patches/nativemetal-fuxi-0010-nocopy-provenance.patch` | harness | native-metal-check.yml、native-metal-host-tests.yml、nocopy-observation-check.yml | 234 |  |  | [T-059](../items/T-tools.zh-TW.md#t-059-harness-gpu-時期的-ci-與主機測試2026-11-0811-14) |
+| `ws:patches/ios-fuxi-fuxi13.patch` | 工作區 | 見對應工具與條目 | 311 |  |  | [T-002](../items/T-tools.zh-TW.md#t-002-工具-scriptssetup_upstreampy)、[T-056](../items/T-tools.zh-TW.md#t-056-工作區規範與文件) |

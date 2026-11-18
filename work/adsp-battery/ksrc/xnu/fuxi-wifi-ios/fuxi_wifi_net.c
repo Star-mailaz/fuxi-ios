@@ -45,6 +45,19 @@ static LCK_MTX_DECLARE(net_tx_lock, &net_lck_grp);
 static const struct fuxi_wifi_net_link *net_link;
 static bool net_link_up;
 static ifnet_t net_ifp;
+/* The WLAN worker owns this list. Follow Sheng's WifiNet.cpp and hand input a bounded packet list. */
+static mbuf_t rx_head, rx_tail;
+static struct ifnet_stat_increment_param rx_pending;
+
+static void
+net_rx_header(mbuf_t packet)
+{
+	char *header = mbuf_data(packet);
+	mbuf_pkthdr_setrcvif(packet, net_ifp);
+	mbuf_pkthdr_setheader(packet, header);
+	mbuf_adj(packet, ETHER_HDR_LEN);
+	bpf_tap_in(net_ifp, DLT_EN10MB, packet, header, ETHER_HDR_LEN);
+}
 
 /* ---- the interface -------------------------------------------------------------------------------- */
 
@@ -77,7 +90,6 @@ fuxi_wifi_net_input(const uint8_t *frame, size_t length)
 	struct ifnet_stat_increment_param stats = { .packets_in = 1, .bytes_in = (uint32_t)length };
 	unsigned int chunks = 1;
 	mbuf_t packet = NULL;
-	char *header;
 
 	if (net_ifp == NULL || !__atomic_load_n(&net_link_up, __ATOMIC_ACQUIRE) || length < ETHER_HDR_LEN || length > FUXI_WIFI_NET_FRAME_MAX ||
 	    mbuf_allocpacket(MBUF_DONTWAIT, length, &chunks, &packet) != 0) {
@@ -88,12 +100,65 @@ fuxi_wifi_net_input(const uint8_t *frame, size_t length)
 		return;
 	}
 	/* as every Ethernet driver hands a frame up: the header noted and stepped over */
-	header = mbuf_data(packet);
-	mbuf_pkthdr_setrcvif(packet, net_ifp);
-	mbuf_pkthdr_setheader(packet, header);
-	mbuf_adj(packet, ETHER_HDR_LEN);
-	bpf_tap_in(net_ifp, DLT_EN10MB, packet, header, ETHER_HDR_LEN);
+	net_rx_header(packet);
 	ifnet_input(net_ifp, packet, &stats);
+}
+
+void
+fuxi_wifi_net_flush_rx(void)
+{
+	mbuf_t packets = rx_head;
+	if (packets == NULL) { return; }
+	struct ifnet_stat_increment_param stats = rx_pending;
+	rx_head = rx_tail = NULL;
+	memset(&rx_pending, 0, sizeof(rx_pending));
+	if (__atomic_load_n(&net_link_up, __ATOMIC_ACQUIRE)) {
+		ifnet_input(net_ifp, packets, &stats);
+	} else {
+		mbuf_freem_list(packets);
+	}
+}
+
+void
+fuxi_wifi_net_input_packet(void *source, size_t length,
+    int (*read)(void *, size_t, void *, size_t))
+{
+	/* Align the IP header after the 14-byte Ethernet header. One cluster holds each supported frame. */
+	const size_t padding = 2;
+	unsigned int chunks = 1;
+	mbuf_t packet = NULL;
+	if (net_ifp == NULL || !__atomic_load_n(&net_link_up, __ATOMIC_ACQUIRE) || read == NULL ||
+	    length < ETHER_HDR_LEN || length > FUXI_WIFI_NET_FRAME_MAX ||
+	    mbuf_allocpacket(MBUF_DONTWAIT, length + padding, &chunks, &packet) != 0) {
+		return;
+	}
+	if (chunks != 1 || mbuf_setdata(packet, (char *)mbuf_data(packet) + padding, length) != 0 ||
+	    read(source, 0, mbuf_data(packet), length) != 0) {
+		mbuf_freem(packet);
+		return;
+	}
+	mbuf_pkthdr_setlen(packet, length);
+	net_rx_header(packet);
+	mbuf_setnextpkt(packet, NULL);
+	if (rx_tail != NULL) {
+		mbuf_setnextpkt(rx_tail, packet);
+	} else {
+		rx_head = packet;
+	}
+	rx_tail = packet;
+	rx_pending.packets_in++;
+	rx_pending.bytes_in += (uint32_t)length;
+	if (rx_pending.packets_in == 64) { fuxi_wifi_net_flush_rx(); }
+}
+
+bool
+fuxi_wifi_net_byte_counts(uint64_t *received, uint64_t *sent)
+{
+	struct ifnet_stats_param stats;
+	if (net_ifp == NULL || ifnet_stat(net_ifp, &stats) != 0) { return false; }
+	*received = stats.bytes_in;
+	*sent = stats.bytes_out;
+	return true;
 }
 
 static unsigned net_ioctls_said;

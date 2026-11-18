@@ -28,7 +28,7 @@ struct menu_keys {
 struct menu_paint_state {
     int drawn;
     enum menu_page page;
-    unsigned focus;
+    unsigned focus, countdown_seconds;
     const char *notice;
 };
 void menu_init(struct menu *m, enum menu_os os, unsigned timeout_ms);

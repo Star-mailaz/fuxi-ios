@@ -42,11 +42,19 @@ GPU_INPUTS = (
     ('gpu', 'firmware/gmu_gen70200.bin', '1a2a419c39046d3141fc5fed5aa7f971de2db40cc7a1d89693c3e26fad64dd98'),
     ('sqe', 'firmware/a740_sqe_sheng.fw', '6d38046654333a6a5a4ee77ab67abc24e3c0c5c68237513afe98e94da8fc9fcc'),
     ('zap', 'work/xiaomi13-ios-gpu-20261108/a740-zap-active-odm.mbn', 'cad0dcb2daaa382eebc94ef65f3285b91b045c8976781f6a80910ca21c933a05'))
+PEER_ZERO_OBJECT = '8f7f1c0b94dc32904a3673c17a07ae9da5d1666fecf4613c253effd824e531ec'
+PEER_ZERO_PROVENANCE = 'd7689a235ac91b4cd108723521ca0d36b8fce3cc714431d572318820b665e385'
+SCAN_PRIORITY_OBJECT = '6e31ab4a480374ff3a761b87b59f5bd17cb9bf7c953d343f2118434cbedfb715'
+SCAN_PRIORITY_WMI_SHA256 = '5898c4fb7c96c4e56ad70f543a1fe9e78a70f588e865478a8b939c6aa9abcc41'
 NATIVE_OBJECTS = {
     '78178a345c8573a13aa1781221b18ea993b0b8716defb09ba4543e494ad4f6e1': None,
     'fbfdc220a37eca52e0db0a8f85a918bbfbbe512e6e4d698144e5a036587cff67':
         'a12107927728e05f4c9e31820a9562cb581355c65d50b9ffa0c2b48d7d503804',
     'dc0694f49e8557b6dce943fe07711e272579b8ffc0e67196499d6f6ec3b83931':
+        '4abc2793df722c3fc03fd098118cc1731301b5523a5c8f8b28d04228b8ec95bb',
+    PEER_ZERO_OBJECT:
+        '4abc2793df722c3fc03fd098118cc1731301b5523a5c8f8b28d04228b8ec95bb',
+    SCAN_PRIORITY_OBJECT:
         '4abc2793df722c3fc03fd098118cc1731301b5523a5c8f8b28d04228b8ec95bb',
 }
 
@@ -92,14 +100,21 @@ def chosen_node(tree):
 
 
 def wifi_ux_value(value, wifi_ios, kernel):
-    """ADT /chosen fuxi,wifi-ux 的 4 bytes：1..31，要 native iOS Wi-Fi 與核心的 fuxi_wifi_ux() 標記。
-    bit 3（記住國家碼）與 bit 4（同狀態電源不重開）要核心印出這兩欄的版本。"""
+    """Encode /chosen fuxi,wifi-ux after checking the artifact supports the selected bits."""
     require(wifi_ios is True, '--wifi-ux needs the native iOS Wi-Fi backend')
-    require(type(value) is int and 1 <= value <= 31, '--wifi-ux must be 1..31')
+    require(type(value) is int and 1 <= value <= 2047, '--wifi-ux must be 1..2047')
     require(b'FUXI WIFI IOS: ux options 0x%x' in kernel and b'fuxi,wifi-ux' in kernel,
             'artifact lacks the fuxi,wifi-ux Wi-Fi options')
-    require(value < 8 or b'country %u, power-same %u)' in kernel,
-            'artifact lacks the fuxi,wifi-ux country/power-same bits')
+    for bits, marker, feature in (
+        (24, b'country %u, power-same %u)', 'country/power-same'),
+        (32, b'FUXI WIFI IOS: native scan recovery enabled', 'scan recovery'),
+        (64, b'FUXI WIFI IOS: native scan uses %u advertised channels', 'advertised scan channels'),
+        (128, b'FUXI WIFI IOS: queued power off takes priority', 'power-off priority'),
+        (256, b'FUXI WIFI IOS: batched ath12k receive enabled', 'batched receive'),
+        (512, b'FUXI WIFI IOS: link traffic rx %llu', 'link statistics'),
+        (1024, b'FUXI ATH12K: WMI scan trace enabled', 'WMI scan trace'),
+    ):
+        require(not (value & bits) or marker in kernel, f'artifact lacks the fuxi,wifi-ux {feature} option')
     return struct.pack('<I', value)
 
 
@@ -457,6 +472,12 @@ def inspect(args):
                     linked.get('entry_points_defined') is True and
                     linked.get('linked_kernel_sha256') == unstripped,
                     'artifact lacks the verified native ath12k link')
+            if linked['object_sha256'] in (PEER_ZERO_OBJECT, SCAN_PRIORITY_OBJECT):
+                require(linked.get('peer_zero_provenance_sha256') == PEER_ZERO_PROVENANCE,
+                        'artifact lacks verified ath12k peer ID fix provenance')
+            if linked['object_sha256'] == SCAN_PRIORITY_OBJECT:
+                require(linked.get('scan_priority_wmi_sha256') == SCAN_PRIORITY_WMI_SHA256,
+                        'artifact lacks verified ath12k WMI scan priority')
             require(b'FUXI ATH12K: start from PBL' in kernel and b'FUXI ATH12K: scan completed' in kernel,
                     'artifact lacks native ath12k runtime markers')
             if args.wifi_ios:
@@ -655,18 +676,27 @@ def build(args, report, tree, source_inputs):
         chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,inject']
         chosen.props.append(('fuxi,inject', 0, struct.pack('<I', 6)))
         report['inject'] = 6
-    if args.wifi_audit:
-        require(args.wifi_ios and b'wifid gets' in kernel.read_bytes(),
-                '--wifi-audit needs the native iOS Wi-Fi backend and a kernel with opt-in wifid injection')
+    if args.wifi_audit or args.wifi_password_prompt:
+        require(args.wifi_ios, 'Wi-Fi injection options need the native iOS Wi-Fi backend')
+        kernel_bytes = kernel.read_bytes()
+        require(not args.wifi_audit or b'wifid gets' in kernel_bytes,
+                '--wifi-audit needs a kernel with opt-in wifid injection')
+        require(not args.wifi_password_prompt or b'Preferences gets' in kernel_bytes,
+                '--wifi-password-prompt needs a kernel with opt-in Settings injection')
         require(not any(token.startswith('fxinj=') for token in report['command_line'].split()),
                 'command line pins fxinj, which would override the ADT')
         current = chosen.prop('fuxi,inject')
         require(current in (struct.pack('<I', 2), struct.pack('<I', 6)), 'unexpected injection mode before Wi-Fi audit')
-        mode = struct.unpack('<I', current)[0] | 8
+        mode = struct.unpack('<I', current)[0]
+        if args.wifi_audit:
+            mode |= 8
+            report['wifi_audit'] = True
+        if args.wifi_password_prompt:
+            mode |= 16
+            report['wifi_password_prompt'] = True
         chosen.props = [(name, flags, value) for name, flags, value in chosen.props if name != 'fuxi,inject']
         chosen.props.append(('fuxi,inject', 0, struct.pack('<I', mode)))
         report['inject'] = mode
-        report['wifi_audit'] = True
     if args.product_haptics:
         # /product/haptics closed-loop=1：MobileGestalt 的 DeviceSupportsClosedLoopHaptics 才會成立，
         # MediaExperience 才建立震動器（走 VibeSynthEngine → AVHapticServer playVibePattern，由注入的 hook 轉核心）。
@@ -705,11 +735,17 @@ def build(args, report, tree, source_inputs):
         require(b'amplitude<<16' in kernel.read_bytes(), 'artifact lacks the DIRECT_PLAY amplitude field')
         chosen.props.append(('fuxi,haptic-amp', 0, struct.pack('<I', args.haptic_amp)))
         report['haptic_amp'] = args.haptic_amp
-    if args.wifi_sb_audit:
-        # 狀態欄 Wi-Fi 圖示診斷（libfuxi-sb.dylib FuxiWifiAudit.c，ADT /chosen fuxi,wifi-sb 非 0 才裝）：唯讀記錄
-        # SBWiFiManager isPowered／isPrimaryInterface／isAssociated／格數與 provider setWifiActive: 的變化。
-        chosen.props.append(('fuxi,wifi-sb', 0, struct.pack('<I', 1)))
-        report['wifi_sb_audit'] = True
+    if args.wifi_sb_audit or args.wifi_sb_refresh:
+        # FuxiWifiAudit.c: bit 0 logs status, bit 1 refreshes the cached network.
+        mode = 0
+        if args.wifi_sb_audit:
+            mode |= 1
+            report['wifi_sb_audit'] = True
+        if args.wifi_sb_refresh:
+            require(args.wifi_ios, '--wifi-sb-refresh needs the native iOS Wi-Fi backend')
+            mode |= 2
+            report['wifi_sb_refresh'] = True
+        chosen.props.append(('fuxi,wifi-sb', 0, struct.pack('<I', mode)))
     if args.wifi_rssi_bounds:
         # wifid 的自動加入用 Apple80211 106（RSSI_BOUNDS）的門檻比對候選網路；核心沒回時門檻是 0，所有負 dBm 的網路都被判
         # 「Below minimum RSSI threshold」。ADT /chosen fuxi,wifi-rssi=1 讓核心回報 s8 上下限 -128／127、門檻 -128（UniXNU zizhan）。
@@ -717,9 +753,7 @@ def build(args, report, tree, source_inputs):
         chosen.props.append(('fuxi,wifi-rssi', 0, struct.pack('<I', 1)))
         report['wifi_rssi_bounds'] = True
     if args.wifi_ux is not None:
-        # Wi-Fi 使用體驗（ADT /chosen fuxi,wifi-ux，核心 fuxi_wifi_ux() 讀一次）：bit 0 開關切換時 GET POWER 立刻回報要求的
-        # 狀態、正要關就不再收掃描／加入（開關不彈回）；bit 1 沒指定 BSSID 時照 wpa_supplicant 的比較法以估計速率選 AP；
-        # bit 2 已連線時又要求加入，選中的是同一台（或同名但沒有可換的）就不斷線。
+        # The kernel reads these options once from /chosen. See --wifi-ux for the bits.
         chosen.props.append(('fuxi,wifi-ux', 0, wifi_ux_value(args.wifi_ux, args.wifi_ios, kernel.read_bytes())))
         report['wifi_ux'] = args.wifi_ux
     if args.wifi_args_adt:
@@ -839,11 +873,27 @@ def self_test():
     ux_marker = b'FUXI WIFI IOS: ux options 0x%x\0fuxi,wifi-ux'
     ux_marker5 = ux_marker + b'\0FUXI WIFI IOS: ux options 0x%x (power-asked %u, pick-rate %u, keep-link %u, ' \
                              b'country %u, power-same %u)\n'
+    ux_recovery = ux_marker5 + b'\0FUXI WIFI IOS: native scan recovery enabled'
+    ux_channels = ux_marker5 + b'\0FUXI WIFI IOS: native scan uses %u advertised channels'
+    ux_both = ux_recovery + ux_channels
+    ux_power = ux_both + b'\0FUXI WIFI IOS: queued power off takes priority'
+    ux_batch = ux_power + b'\0FUXI WIFI IOS: batched ath12k receive enabled'
+    ux_all = ux_batch + b'\0FUXI WIFI IOS: link traffic rx %llu'
+    ux_trace = ux_all + b'\0FUXI ATH12K: WMI scan trace enabled'
     require(wifi_ux_value(7, True, ux_marker) == struct.pack('<I', 7) and
             wifi_ux_value(1, True, ux_marker) == struct.pack('<I', 1) and
             wifi_ux_value(31, True, ux_marker5) == struct.pack('<I', 31) and
-            wifi_ux_value(16, True, ux_marker5) == struct.pack('<I', 16), 'wifi-ux value differs')
+            wifi_ux_value(16, True, ux_marker5) == struct.pack('<I', 16) and
+            wifi_ux_value(63, True, ux_recovery) == struct.pack('<I', 63) and
+            wifi_ux_value(95, True, ux_channels) == struct.pack('<I', 95) and
+            wifi_ux_value(127, True, ux_both) == struct.pack('<I', 127) and
+            wifi_ux_value(255, True, ux_power) == struct.pack('<I', 255) and
+            wifi_ux_value(511, True, ux_batch) == struct.pack('<I', 511) and
+            wifi_ux_value(1023, True, ux_all) == struct.pack('<I', 1023) and
+            wifi_ux_value(2047, True, ux_trace) == struct.pack('<I', 2047), 'wifi-ux value differs')
     for selectors in ((0, True, ux_marker), (8, True, ux_marker), (31, True, ux_marker), (32, True, ux_marker5),
+                      (64, True, ux_marker5), (127, True, ux_recovery), (127, True, ux_channels), (128, True, ux_both),
+                      (256, True, ux_power), (512, True, ux_batch), (1024, True, ux_all),
                       (True, True, ux_marker), ('3', True, ux_marker),
                       (3, False, ux_marker), (3, 1, ux_marker), (3, True, b'fuxi,wifi-ux'),
                       (3, True, b'FUXI WIFI IOS: ux options 0x%x')):
@@ -1312,6 +1362,8 @@ def main():
     parser.add_argument('--wifi-audit', action='store_true',
                         help='Opt-in wifid injection for bounded CoreWiFi scan conversion/filter diagnostics; '
                              'requires --wifi-ios and a kernel that supports injection bit 8')
+    parser.add_argument('--wifi-password-prompt', action='store_true',
+                        help='Opt into the manual Wi-Fi password prompt on the Fuxi image without Bluetooth')
     parser.add_argument('--product-haptics', action='store_true',
                         help='Add /product/haptics closed-loop=1 so MediaExperience creates its vibrator; '
                              'needs --haptic and --inject-media')
@@ -1322,16 +1374,23 @@ def main():
                         help='ADT fuxi,haptic-env=1: mediaserverd shortens Atoms to their Envelope area; '
                              'needs --haptic and --inject-media')
     parser.add_argument('--wifi-sb-audit', action='store_true',
-                        help='ADT fuxi,wifi-sb=1: SpringBoard logs the status bar Wi-Fi inputs (read only)')
+                        help='Set bit 0 of fuxi,wifi-sb to log the native status bar Wi-Fi inputs')
+    parser.add_argument('--wifi-sb-refresh', action='store_true',
+                        help='Set bit 1 of fuxi,wifi-sb to refresh a missing association on a valid RSSI update')
     parser.add_argument('--wifi-rssi-bounds', action='store_true',
                         help='ADT fuxi,wifi-rssi=1: answer Apple80211 RSSI_BOUNDS (106) with s8 bounds and a -128 '
                              'threshold so wifid auto-join stops rejecting every network; requires --wifi-ios')
     parser.add_argument('--wifi-ux', type=int, metavar='BITS',
-                        help='ADT fuxi,wifi-ux 1..31: bit 0 reports the asked radio power at once and refuses scans/joins '
+                        help='ADT fuxi,wifi-ux 1..2047: bit 0 reports the asked radio power at once and refuses scans/joins '
                              'while switching off; bit 1 picks the access point by estimated rate (wpa_supplicant order); '
                              'bit 2 keeps the link when a join picks the access point already joined; bit 3 keeps the '
                              'country code wifid sets; bit 4 leaves the radio alone when asked for the power it already '
-                             'has; requires --wifi-ios')
+                             'has; bit 5 keeps radio control after a failed scan and yields to power off (with bit 0); '
+                             'bit 6 scans the advertised 2.4/5 GHz channels when no list is provided; '
+                             'bit 7 gives pending power off priority over scans, joins and later enables; '
+                             'bit 8 batches receive mbufs; bit 9 logs PHY samples and interface byte counts. '
+                             'Bit 10 traces ath12k scan events. '
+                             'Requires --wifi-ios')
     parser.add_argument('--daily-tuning', action='store_true',
                         help='Add the chain-v7 smoothness tokens of native-dly-ram9g-rtctorch-sb127-loader '
                              '(fuxivsynctoff=6000 sweetlog=0 fuxiswapwait=0 fuxiperf=2 fuxicores=0x7c fuxitudebug=nocb '

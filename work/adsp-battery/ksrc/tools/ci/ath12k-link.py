@@ -8,13 +8,22 @@ import subprocess
 OBJECT_SHA256 = 'dc0694f49e8557b6dce943fe07711e272579b8ffc0e67196499d6f6ec3b83931'
 LOCK_SHA256 = 'f23882695f1c136c27b3f9cb36673bebad9ae1fc2af3fa787a98bd4add76c3c9'
 SCAN_DWELL_SHA256 = '4abc2793df722c3fc03fd098118cc1731301b5523a5c8f8b28d04228b8ec95bb'
+PEER_ZERO_PROVENANCE_SHA256 = 'd7689a235ac91b4cd108723521ca0d36b8fce3cc714431d572318820b665e385'
+SCAN_PRIORITY_OBJECT = '6e31ab4a480374ff3a761b87b59f5bd17cb9bf7c953d343f2118434cbedfb715'
+SCAN_PRIORITY_WMI_SHA256 = '5898c4fb7c96c4e56ad70f543a1fe9e78a70f588e865478a8b939c6aa9abcc41'
+OBJECT_SOURCES = {
+    OBJECT_SHA256: (44010197996, 'b2876c666c76af54be793a41830596a6b604a063', False),
+    '8f7f1c0b94dc32904a3673c17a07ae9da5d1666fecf4613c253effd824e531ec':
+        (44239539371, '6e9f2a2d7c67b69cb146aa01ca37ba9d829dfbea', True),
+    SCAN_PRIORITY_OBJECT: (44243587936, '7387e889bd65b41fbe9197aaa6daba0c25ca2c6a', True),
+}
 ENTRY_POINTS = (
     '_nw_wifi_start', '_nw_wifi_step', '_nw_wifi_stop', '_nw_wifi_poll',
     '_nw_wifi_irq_mode', '_nw_wifi_scan', '_nw_wifi_bss_count',
     '_nw_wifi_bss_get', '_nw_wifi_stats',
     '_nw_wifi_set_platform', '_nw_wifi_control_transport_set',
     '_nw_wifi_control_attach', '_nw_wifi_control_receive',
-    '_nw_wifi_power', '_nw_wifi_set_events', '_nw_wifi_tx',
+    '_nw_wifi_power', '_nw_wifi_set_events', '_nw_wifi_tx', '_nw_wifi_link_state',
 )
 IMPORTS = {
     '_bzero', '_memcmp', '_memcpy', '_memmove', '_memset', '_snprintf',
@@ -62,12 +71,26 @@ def platform_version(path):
     return versions[0]
 
 
+def validate_peer_zero(directory, report):
+    provenance = directory / 'fuxi_ath12k.peer-zero.json'
+    require(provenance.is_file() and not provenance.is_symlink() and
+            digest(provenance) == PEER_ZERO_PROVENANCE_SHA256, 'ath12k peer ID fix provenance differs')
+    patch = json.loads(provenance.read_text(encoding='utf-8'))
+    source = patch['source']
+    built = [entry for entry in report.get('objects', []) if entry.get('source', '').endswith('/' + source)]
+    require(len(built) == 1 and built[0].get('source_sha256') == patch['source_after_sha256'],
+            'ath12k build does not include the patched peer lookup')
+    return patch
+
+
 def validate_bundle(directory):
     directory = Path(directory).resolve()
     object_path = directory / 'fuxi_ath12k.o'
     require(object_path.is_file() and not object_path.is_symlink(),
             'Pinned ath12k object is missing or is a symlink')
-    require(digest(object_path) == OBJECT_SHA256, 'Pinned ath12k object hash differs')
+    object_sha256 = digest(object_path)
+    require(object_sha256 in OBJECT_SOURCES, 'Pinned ath12k object hash differs')
+    source_run, source_commit, has_peer_zero_fix = OBJECT_SOURCES[object_sha256]
     with object_path.open('rb') as stream:
         header = stream.read(32)
     require(len(header) == 32 and struct.unpack_from('<4I', header) ==
@@ -109,9 +132,9 @@ def validate_bundle(directory):
     exports = set((directory / 'fuxi_ath12k.exports.txt').read_text().split())
     require(undefined == IMPORTS, 'ath12k kernel imports differ')
     require(set(ENTRY_POINTS) <= exports, 'ath12k module entry points are missing')
-    return {
+    record = {
         'schema': 'fuxi-ath12k-link-v1',
-        'object_sha256': OBJECT_SHA256,
+        'object_sha256': object_sha256,
         'build_report_sha256': digest(report_path),
         'source_lock_sha256': LOCK_SHA256,
         'source_identity': identity,
@@ -119,13 +142,23 @@ def validate_bundle(directory):
         'scan_dwell': dwell,
         'entry_points': list(ENTRY_POINTS),
         'imports': sorted(IMPORTS),
-        'source_run': 44010197996,
-        'source_commit': 'b2876c666c76af54be793a41830596a6b604a063',
+        'source_run': source_run,
+        'source_commit': source_commit,
         'kernel_build_target': KERNEL_TARGET,
         'macho_platform': KERNEL_PLATFORM[0],
         'minimum_os': '15.5',
         'hardware_verified': False,
     }
+    if has_peer_zero_fix:
+        record['peer_zero'] = validate_peer_zero(directory, report)
+        record['peer_zero_provenance_sha256'] = PEER_ZERO_PROVENANCE_SHA256
+    if object_sha256 == SCAN_PRIORITY_OBJECT:
+        wmi = [entry for entry in report.get('objects', [])
+               if entry.get('source', '').endswith('/out/ath12k-src/wmi.c')]
+        require(len(wmi) == 1 and wmi[0].get('source_sha256') == SCAN_PRIORITY_WMI_SHA256,
+                'ath12k build does not encode the WMI scan priority')
+        record['scan_priority_wmi_sha256'] = SCAN_PRIORITY_WMI_SHA256
+    return record
 
 
 def main():

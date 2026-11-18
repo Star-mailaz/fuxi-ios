@@ -58,6 +58,8 @@ sta_now_ms(void)
 
 /* what has been asked for and not begun */
 static bool asked_power, asked_power_on, asked_scan, asked_join, asked_leave;
+/* OFF must reach the radio even if a later ON was queued while a scan/join owned the worker. */
+static bool power_off_pending;
 static struct fuxi_wifi_sta_scan asked_scan_what;
 static struct fuxi_wifi_sta_join asked_join_what;
 
@@ -97,8 +99,9 @@ sta_runs(__unused void *parameter, __unused wait_result_t result)
 		/* one thing at a time, in the order that makes sense when several wait */
 		if (asked_power) {
 			power = true;
-			power_on = asked_power_on;
-			asked_power = false;
+			power_on = asked_power_on && !power_off_pending;
+			asked_power = power_on != asked_power_on;
+			power_off_pending = false;
 			power_running = true;
 			power_running_on = power_on;
 		} else if (asked_leave) {
@@ -238,7 +241,13 @@ fuxi_wifi_sta_present(void)
 static bool
 power_wanted(bool *on)
 {
-	if (!(fuxi_wifi_ux() & FUXI_WIFI_UX_POWER_ASKED)) {
+	unsigned ux = fuxi_wifi_ux();
+	if (power_off_pending || (power_running && !power_running_on &&
+	    (ux & FUXI_WIFI_UX_POWER_OFF_FIRST))) {
+		*on = false;
+		return true;
+	}
+	if (!(ux & FUXI_WIFI_UX_POWER_ASKED)) {
 		return false;
 	}
 	if (asked_power) {
@@ -263,6 +272,15 @@ fuxi_wifi_sta_powered(void)
 	}
 	lck_mtx_unlock(&sta_lock);
 	return on;
+}
+
+bool
+fuxi_wifi_sta_power_off_pending(void)
+{
+	lck_mtx_lock(&sta_lock);
+	bool pending = power_off_pending;
+	lck_mtx_unlock(&sta_lock);
+	return pending;
 }
 
 /* 能不能再收掃描／加入：電源是開的或正要開；bit 0 打開時，正要關就不收 */
@@ -301,6 +319,9 @@ fuxi_wifi_sta_ask_power(bool on)
 	asked_power = true;
 	asked_power_on = on;
 	if (!on) {
+		if (fuxi_wifi_ux() & FUXI_WIFI_UX_POWER_OFF_FIRST) {
+			power_off_pending = true;
+		}
 		asked_scan = asked_join = asked_leave = false;
 		bzero(&asked_join_what, sizeof(asked_join_what));
 	}

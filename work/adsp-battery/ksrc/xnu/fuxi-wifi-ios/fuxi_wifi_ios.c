@@ -37,6 +37,8 @@ static struct fuxi_wifi_net_link link = {
 };
 static const struct fuxi_wifi_input input = {
 	.rx_frame = fuxi_wifi_net_input, .link_state = fuxi_wifi_net_link_state,
+	.rx_packet = fuxi_wifi_net_input_packet, .rx_flush = fuxi_wifi_net_flush_rx,
+	.byte_counts = fuxi_wifi_net_byte_counts,
 };
 
 bool

@@ -67,6 +67,20 @@ static void centered_in(struct canvas *c, unsigned left, unsigned width,
 static void centered(struct canvas *c, unsigned y, const char *text, unsigned scale)
 { centered_in(c, 60, 960, y, text, scale); }
 
+static void draw_countdown(struct canvas *c, unsigned seconds)
+{
+    static const char suffix[] = " 秒後啟動 Android";
+    enum { MAX_DIGITS = 7 }; /* ceil(UINT32_MAX / 1000) fits in seven digits. */
+    char text[MAX_DIGITS + sizeof(suffix)];
+    for (size_t i = 0; i < sizeof(suffix); ++i) text[MAX_DIGITS + i] = suffix[i];
+    char *start = text + MAX_DIGITS;
+    do {
+        *--start = (char)('0' + seconds % 10);
+        seconds /= 10;
+    } while (seconds);
+    centered(c, 2080, start, 1);
+}
+
 static unsigned button_y(enum menu_page page, unsigned focus)
 {
     return page == MENU_HOME ? 900 + 250 * focus : 780 + 180 * focus;
@@ -118,9 +132,10 @@ int menu_paint(struct menu_paint_state *state, const struct menu *m,
     int first = !state->drawn;
     int page_changed = first || state->page != m->page;
     int focus_changed = state->focus != m->focus;
-    if (!notice || !*notice)
-        notice = m->remaining_ms && !m->interacted ? "無操作後啟動 Android" : 0;
-    int notice_changed = state->notice != notice;
+    if (notice && !*notice) notice = 0;
+    unsigned seconds = !notice && !m->interacted && m->page == MENU_HOME
+        ? m->remaining_ms / 1000 + (m->remaining_ms % 1000 != 0) : 0;
+    int notice_changed = state->notice != notice || state->countdown_seconds != seconds;
     if (!page_changed && !focus_changed && !notice_changed) return 0;
     if (first) {
         rect(&c, 0, 0, 1080, 2400, BLACK);
@@ -152,11 +167,13 @@ int menu_paint(struct menu_paint_state *state, const struct menu *m,
     if (notice_changed) {
         if (!first) rect(&c, 60, 2080, 960, 64, BLACK);
         if (notice) centered(&c, 2080, notice, 1);
+        else if (seconds) draw_countdown(&c, seconds);
     }
     state->drawn = 1;
     state->page = m->page;
     state->focus = m->focus;
     state->notice = notice;
+    state->countdown_seconds = seconds;
     return 1;
 }
 

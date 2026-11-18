@@ -71,7 +71,10 @@ static void read_random(void *buffer,unsigned length) {
     for (unsigned index=0;index<length;index++) ((uint8_t *)buffer)[index]=(uint8_t)index;
 }
 bool fuxi_wifi_sta_busy(void) { return false; }
-bool fuxi_wifi_sta_powered(void) { return true; }
+static bool test_powered = true;
+static bool test_off_pending;
+bool fuxi_wifi_sta_powered(void) { return test_powered; }
+bool fuxi_wifi_sta_power_off_pending(void) { return test_off_pending; }
 static unsigned test_ux;                        /* ADT fuxi,wifi-ux；bootstrap() 時讀進 wli.ux */
 unsigned fuxi_wifi_ux(void) { return test_ux; }
 int fuxi_wifi_sta_ask_power(bool on) { (void)on; return 0; }
@@ -130,6 +133,8 @@ static int tx_status;
 int nw_wifi_tx(const uint8_t *frame, size_t length) {
     assert(frame && length >= 14 && length <= 2000); tx_calls++; return tx_status;
 }
+static unsigned phy_reads;
+void nw_wifi_link_state(char *text,int size) { phy_reads++; snprintf(text,(size_t)size,"fixture rate"); }
 bool fuxi_wifi_ios_native_ready(void) { return ready; }
 '''
 
@@ -141,9 +146,20 @@ static const uint8_t sae_ap[6]={2,0x46,0x55,0x58,0x49,4}, mfp_ap[6]={2,0x46,0x55
 static const uint8_t far_ap[6]={2,0x46,0x55,0x58,0x49,6}, weak_ap[6]={2,0x46,0x55,0x58,0x49,7};
 static const uint8_t own_rsn[22]={48,20,1,0,0,0x0f,0xac,4,1,0,0,0x0f,0xac,4,1,0,0,0x0f,0xac,2,0,0};
 static unsigned rx_frames, link_ups, link_downs;
+static unsigned rx_packets,rx_flushes;
+static uint64_t rx_octets,tx_octets;
 static void input_rx(const uint8_t *frame,size_t length) { assert(frame && length>=14); rx_frames++; }
 static void input_link(bool up) { if (up) link_ups++; else link_downs++; }
-static const struct fuxi_wifi_input input={input_rx,input_link};
+static void input_rx_packet(void *source,size_t length,int (*read)(void *,size_t,void *,size_t)) {
+    uint8_t bytes[60]; assert(length==sizeof(bytes) && !read(source,0,bytes,length) && bytes[0]==0xa5);
+    rx_packets++;
+}
+static void input_rx_flush(void) { rx_flushes++; }
+static bool input_byte_counts(uint64_t *rx,uint64_t *tx) { *rx=rx_octets; *tx=tx_octets; return true; }
+static const struct fuxi_wifi_input input={
+    .rx_frame=input_rx,.link_state=input_link,.rx_packet=input_rx_packet,.rx_flush=input_rx_flush,
+    .byte_counts=input_byte_counts,
+};
 bool fuxi_wifi_ios_attach(const struct fuxi_wifi_backend *backend) {
     assert(backend == &wli_backend && !memcmp(backend->station.address,station,6));
     assert(wli.info && wli.channels && !wli_state.last_error && backend->station.join==wli_join);
@@ -194,7 +210,12 @@ static void bootstrap(void) {
     assert(wli_channels[1].flags==FUXI_WIFI_STA_CHANNEL_RADAR);
     ready=false; assert(!wli_step(3) && !attachments);
     ready=true; assert(!wli_step(4) && attachments==1);
-    assert(events && events->rx && !events->rx_packet && wli_input==&input);
+    assert(events && wli_input==&input);
+    if (test_ux & FUXI_WIFI_UX_RX_BATCH) {
+        assert(events->rx_packet && events->rx_flush && !events->rx);
+    } else {
+        assert(events->rx && !events->rx_packet);
+    }
 }
 static atomic_bool caller_done;
 static int caller_result;
@@ -466,6 +487,112 @@ static void cache_tests(void) {
     test_cache=0; memset(&caller_scan,0,sizeof(caller_scan));
 }
 
+static void scan_done(unsigned status,uint64_t generation) {
+    uint8_t bytes[MESSAGE]; size_t length=header(bytes,3,0x102,generation);
+    fwc_write(bytes+20,status,4); assert(!deliver(bytes,length));
+}
+
+static void scan_recovery_tests(void) {
+    memset(&caller_scan,0,sizeof(caller_scan));
+    test_ux=FUXI_WIFI_UX_SCAN_RECOVER|FUXI_WIFI_UX_POWER_ASKED;
+    for (unsigned event_first=0;event_first<2;event_first++) {
+        bootstrap(); pthread_t thread=begin(2,false); step(); expect_request(2);
+        if (event_first) scan_done(9,wli.generation); else respond(2,0);
+        step(); assert(!atomic_load(&caller_done) && !wli.fetching);
+        if (event_first) respond(2,0); else scan_done(9,wli.generation);
+        step(); assert(!pthread_join(thread,NULL) && caller_result==EIO);
+        assert(!wli.fatal && !wli.scan_draining && !wli.cache_valid && !wli_bss_count);
+    }
+
+    bootstrap(); pthread_t thread=begin(2,false); step(); respond(2,0);
+    now=wli.deadline-2; step();
+    assert(!atomic_load(&caller_done));
+    step(); assert(!pthread_join(thread,NULL) && caller_result==ETIMEDOUT);
+    assert(!wli.fatal && wli.scan_draining && wli_scan(&caller_scan)==EBUSY);
+    power_test(true,2); assert(wli.scan_draining);
+    scan_done(9,2);
+    assert(!wli.scan_draining);
+    thread=begin(2,false); step(); scan_accept(false); serve_bss(6,0);
+    assert(!pthread_join(thread,NULL) && !caller_result && wli_bss_count==5);
+
+    bootstrap(); wli_state.phase=FUXI_WIFI_STA_JOINED;
+    unsigned downs=link_downs;
+    thread=begin(2,false); step(); respond(2,0);
+    test_powered=false; step(); test_powered=true;
+    assert(!pthread_join(thread,NULL) && caller_result==ECANCELED);
+    assert(wli.scan_draining && wli_state.phase==FUXI_WIFI_STA_JOINED && link_downs==downs);
+    power_test(false,3);
+    assert(!wli.scan_draining);
+    power_test(true,4);
+    thread=begin(2,false); step(); scan_done(9,2);
+    assert(!wli.scan_done && !wli.fatal);
+    scan_accept(true); serve_bss(6,0);
+    assert(!pthread_join(thread,NULL) && !caller_result);
+
+    /* An already expired aggregate scan must not enqueue another dwell batch. */
+    test_dwell=test_batch=1; offered_features=FWC_FEATURE_SCAN_DWELL_MS;
+    caller_scan.dwell_ms=110; caller_scan.frequency_count=40;
+    for (unsigned index=0;index<40;index++) caller_scan.frequencies[index]=2412+index*5;
+    bootstrap(); thread=begin(2,false); step(); scan_accept(false);
+    unsigned sequence=wli.sequence;
+    now=wli.deadline-1; step();
+    assert(!pthread_join(thread,NULL) && caller_result==ETIMEDOUT);
+    assert(wli.sequence==sequence && !wli.scan_draining && !wli.fatal);
+
+    test_ux=test_dwell=test_batch=offered_features=0;
+    memset(&caller_scan,0,sizeof(caller_scan));
+    puts("PASS scan recovery: abort, deadline, power cancellation, late completion and a subsequent scan");
+}
+
+static int read_test_packet(void *source,size_t offset,void *dest,size_t length) {
+    assert(offset<=60 && length<=60-offset); memcpy(dest,(uint8_t *)source+offset,length); return 0;
+}
+
+static void rx_batch_tests(void) {
+    test_ux=FUXI_WIFI_UX_RX_BATCH|FUXI_WIFI_UX_LINK_STATS;
+    bootstrap();
+    uint8_t frame[60]={0xa5};
+    events->rx_packet(frame,sizeof(frame),read_test_packet);
+    assert(!rx_packets);
+    __atomic_store_n(&wli_link,1,__ATOMIC_RELEASE);
+    events->rx_packet(frame,sizeof(frame),read_test_packet);
+    events->rx_flush(); assert(rx_packets==1 && rx_flushes==1);
+    assert(!wli_step(100) && !phy_reads);
+    rx_octets=700;tx_octets=80;
+    assert(!wli_step(5099) && !phy_reads);
+    assert(!wli_step(5100) && phy_reads==1);
+    __atomic_store_n(&wli_link,0,__ATOMIC_RELEASE);
+    assert(!wli_step(5101));
+    test_ux=0;
+    puts("PASS native RX batch callbacks and paced PHY counters");
+}
+
+static void scan_scope_tests(void) {
+    size_t size;
+    memset(&caller_scan,0,sizeof(caller_scan)); caller_scan.cache_allowed=true;
+    bootstrap(); pthread_t thread=begin(2,false); step();
+    assert(!request_attribute(20,&size));
+    scan_accept(false); serve_bss(6,0); assert(!pthread_join(thread,NULL) && !caller_result);
+
+    test_ux=FUXI_WIFI_UX_SCAN_CHANNELS; test_cache=1;
+    bootstrap(); thread=begin(2,false); step();
+    const uint8_t *frequencies=request_attribute(20,&size);
+    assert(frequencies && size==8 && fwc_read32(frequencies)==2412 && fwc_read32(frequencies+4)==5180);
+    assert(!request_attribute(FWC_ATTR_SCAN_DWELL_MS,&size));
+    scan_accept(false); serve_bss(6,0); assert(!pthread_join(thread,NULL) && !caller_result);
+    unsigned sequence=wli.sequence;
+    assert(!wli_scan(&caller_scan) && wli.sequence==sequence && wli.cache_hits==1);
+
+    caller_scan.frequency_count=1; caller_scan.frequencies[0]=5200;
+    thread=begin(2,false); step();
+    frequencies=request_attribute(20,&size);
+    assert(frequencies && size==4 && fwc_read32(frequencies)==5200);
+    scan_accept(true); serve_bss(6,0); assert(!pthread_join(thread,NULL) && !caller_result);
+    test_ux=test_cache=0;
+    memset(&caller_scan,0,sizeof(caller_scan));
+    puts("PASS implicit scan uses advertised channels in one request; explicit channels and cache coverage preserved");
+}
+
 /* Events from the module about the join. */
 static void event_auth(const uint8_t *bssid,unsigned status) {
     uint8_t bytes[MESSAGE], frame[30]={0xb0};
@@ -559,6 +686,25 @@ static int failed_join(pthread_t thread) {
     assert(!pthread_join(thread,NULL));
     assert(wli_state.phase==FUXI_WIFI_STA_IDLE && wlj.step==WLJ_NONE && !wli.fatal);
     assert(wli_state.last_error==caller_result); return caller_result;
+}
+static void power_off_join_test(void) {
+    test_ux=FUXI_WIFI_UX_POWER_OFF_FIRST;
+    bootstrap();
+    caller_scan.frequency_count=0;
+    pthread_t thread=begin(2,false); step(); scan_accept(false); serve_bss(6,0);
+    assert(!pthread_join(thread,NULL) && !caller_result);
+    ask_join("IEEE","password",FUXI_WIFI_STA_WPA2_PSK);
+    thread=begin(3,false); step(); expect_request(4);
+    respond(4,0);
+    test_off_pending=true;
+    step(); expect_request(6); respond(6,0); step();
+    assert(failed_join(thread)==ECANCELED);
+    assert(wli_scan(&caller_scan)==ECANCELED && !wli.fatal);
+    power_test(false,3);
+    test_off_pending=false;
+    power_test(true,4);
+    test_ux=0;
+    puts("PASS power off cancels an active join and leaves radio control available");
 }
 static void join_tests(void) {
     uint8_t frame[60]={0}, reply[256];
@@ -795,6 +941,10 @@ int main(void) {
     dwell_tests();
     batch_tests();
     cache_tests();
+    scan_recovery_tests();
+    scan_scope_tests();
+    rx_batch_tests();
+    power_off_join_test();
     bootstrap(); power_test(false,3); power_test(true,4); power_test(true,4);
     memset(&caller_scan,0,sizeof(caller_scan)); caller_scan.ssid_length=4;
     memcpy(caller_scan.ssid,"real",4); caller_scan.frequency_count=64;
